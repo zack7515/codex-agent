@@ -9,10 +9,15 @@
 就沿用那個 thread 只送最後一句；對不上（新對話、使用者改了舊訊息、伺服器重啟）就開新 thread，
 並把先前的對話當參考文字一起送。
 
+Skills：訊息只打 /skills 會列出可用的 skills（不經過模型）；訊息裡的 $名稱 會明確指定 Codex 使用該 skill。
+
 環境變數：
-    CODEX_GATEWAY_TOKEN    對方要帶的 Bearer token（對外開放時必填）
+    CODEX_GATEWAY_USERS    多人使用：名單檔（JSON，{"使用者": "token"}），每人用自己的 token，
+                           工作資料夾自動分到 CODEX_GATEWAY_CWD/<使用者>/，對話也互不相通
+    CODEX_GATEWAY_TOKEN    只有一組 token 時用這個（沒設 USERS 時才看）；對外開放時兩者至少設一個
     CODEX_AGENT_URL        codex_agent_server.py 位置，預設 http://127.0.0.1:8765
-    CODEX_GATEWAY_CWD      Codex 的工作資料夾，預設是 codex_agent_server.py 的啟動位置
+    CODEX_GATEWAY_CWD      Codex 的工作資料夾；多人模式是各人資料夾的上層，預設 ./workspaces
+                           單一 token 時預設是 codex_agent_server.py 的啟動位置
     CODEX_GATEWAY_SANDBOX  read-only / workspace-write（預設）/ full-access
     LLM_BASE_URL、LLM_MODEL、LLM_API_KEY
                            有設的話，Codex 還沒啟動時 gateway 會自己連線；沒設就要先在網頁按連線
@@ -23,11 +28,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import sys
 import time
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -37,13 +44,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 AGENT_URL = os.environ.get("CODEX_AGENT_URL", "http://127.0.0.1:8765")
-TOKEN = os.environ.get("CODEX_GATEWAY_TOKEN", "")
 MODEL_ID = "codex-agent"
 THREAD_SETTINGS = {
     "cwd": os.environ.get("CODEX_GATEWAY_CWD", ""),
     "sandbox": os.environ.get("CODEX_GATEWAY_SANDBOX", "workspace-write"),
     "approval_mode": "auto_review",   # 對方的 UI 不會處理核准卡片，交給 Codex 自己審
 }
+
+
+def load_users() -> tuple[dict[str, str], Path | None]:
+    """回傳 ({使用者: token}, 各人資料夾的上層)；單一 token 模式上層是 None（不分資料夾）。"""
+    path = os.environ.get("CODEX_GATEWAY_USERS")
+    if not path:
+        token = os.environ.get("CODEX_GATEWAY_TOKEN", "")
+        return ({"default": token} if token else {}), None
+    users = json.loads(Path(path).read_text(encoding="utf-8"))
+    for name, token in users.items():
+        # 名稱會變成資料夾名，只允許安全字元，避免 ../ 之類跳出上層
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) or not isinstance(token, str) or len(token) < 16:
+            sys.exit(f"{path}：使用者 {name!r} 名稱只能用英數字 _ -，token 至少 16 字")
+    if len(set(users.values())) != len(users):
+        sys.exit(f"{path}：每個人的 token 要不一樣")
+    root = Path(os.environ.get("CODEX_GATEWAY_CWD") or Path(__file__).with_name("workspaces"))
+    return users, root.resolve()
+
+
+USERS, WORKSPACE_ROOT = load_users()
 LLM = {k: v for k, v in {"base_url": os.environ.get("LLM_BASE_URL"),
                          "model": os.environ.get("LLM_MODEL"),
                          "api_key": os.environ.get("LLM_API_KEY")}.items() if v}
@@ -56,9 +82,15 @@ app = FastAPI(title="Codex Agent OpenAI Gateway")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-def auth(request: Request) -> None:
-    if TOKEN and not secrets.compare_digest(request.headers.get("authorization", ""), f"Bearer {TOKEN}"):
-        raise HTTPException(401, "token 錯誤或沒帶")
+def auth(request: Request) -> str:
+    """回傳使用者名稱；沒設任何 token（只限本機）時是 default。"""
+    if not USERS:
+        return "default"
+    got = request.headers.get("authorization", "")
+    for name, token in USERS.items():
+        if secrets.compare_digest(got, f"Bearer {token}"):
+            return name
+    raise HTTPException(401, "token 錯誤或沒帶")
 
 
 def text_of(content: Any) -> str:
@@ -67,8 +99,8 @@ def text_of(content: Any) -> str:
     return content or ""
 
 
-def history_key(msgs: list[dict]) -> str:
-    norm = [[m["role"], text_of(m.get("content")).strip()] for m in msgs]
+def history_key(user: str, msgs: list[dict]) -> str:
+    norm = [user, *([m["role"], text_of(m.get("content")).strip()] for m in msgs)]   # 加上使用者，對話不會接到別人的
     return hashlib.sha256(json.dumps(norm, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -85,25 +117,61 @@ def with_history(convo: list[dict], text: str) -> str:
     return f"以下是先前的對話紀錄，供你參考：\n\n{past}\n\n---\n\n{text}"
 
 
-async def new_thread(instructions: str) -> str:
-    body = {**THREAD_SETTINGS, "developer_instructions": instructions}
-    r = await agent.post("/api/threads", json=body)
-    if r.status_code == 400 and LLM:   # Codex 還沒啟動
+def user_cwd(user: str) -> str:
+    if not WORKSPACE_ROOT:
+        return THREAD_SETTINGS["cwd"]
+    cwd = WORKSPACE_ROOT / user
+    cwd.mkdir(parents=True, exist_ok=True)
+    return str(cwd)
+
+
+async def call(method: str, url: str, **kw: Any) -> httpx.Response:
+    """呼叫 codex_agent_server；Codex 還沒啟動（回 400）且有設 LLM_BASE_URL 時，自動連線後重試。"""
+    r = await agent.request(method, url, **kw)
+    if r.status_code == 400 and LLM:
         c = await agent.post("/api/connect", json=LLM)
         if not c.json().get("ok"):
             raise HTTPException(503, f"Codex 啟動失敗：{c.json().get('error')}")
-        r = await agent.post("/api/threads", json=body)
+        r = await agent.request(method, url, **kw)
     if r.status_code == 400:
         raise HTTPException(503, "Codex 尚未啟動：請先在 Codex Agent 網頁連線，或設定 LLM_BASE_URL")
+    return r
+
+
+async def list_skills(user: str) -> list[dict]:
+    data = (await call("GET", "/api/skills", params={"cwd": user_cwd(user)})).json()
+    return data.get("skills", [])
+
+
+async def mentioned_skills(user: str, text: str) -> list[dict]:
+    """訊息裡的 $名稱 對得到 Codex 載入的 skill，就明確指定使用（跟網頁 / 選單一樣）；對不到的當普通文字。"""
+    names = set(re.findall(r"\$([\w:.-]+)", text))
+    if not names:
+        return []
+    return [{"name": k["name"], "path": k["path"]} for k in await list_skills(user) if k["name"] in names]
+
+
+def skills_help(skills: list[dict]) -> str:
+    if not skills:
+        return "目前沒有可用的 skills。"
+    rows = "\n".join(f"- `${k['name']}`：{k.get('description') or ''}" for k in skills)
+    return (f"可用的 skills（{len(skills)}）：\n\n{rows}\n\n"
+            f"在訊息裡打 `$名稱` 就會指定使用，例如：`${skills[0]['name']} 幫我…`")
+
+
+async def new_thread(user: str, instructions: str) -> str:
+    body = {**THREAD_SETTINGS, "cwd": user_cwd(user), "developer_instructions": instructions}
+    r = await call("POST", "/api/threads", json=body)
     data = r.json()
     if not data.get("ok"):
         raise HTTPException(502, f"開對話失敗：{data.get('error')}")
     return data["thread_id"]
 
 
-async def open_turn(thread_id: str, text: str, effort: str) -> httpx.Response | None:
+async def open_turn(thread_id: str, text: str, effort: str, skills: list[dict]) -> httpx.Response | None:
     """回傳串流中的回應；thread 不存在（例如伺服器重啟過）回 None。"""
-    req = agent.build_request("POST", f"/api/threads/{thread_id}/turn", json={"text": text, "effort": effort})
+    req = agent.build_request("POST", f"/api/threads/{thread_id}/turn",
+                              json={"text": text, "effort": effort, "skills": skills})
     resp = await agent.send(req, stream=True)
     if resp.status_code == 200:
         return resp
@@ -154,8 +222,8 @@ async def models():
     return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "codex-agent"}]}
 
 
-@app.post("/v1/chat/completions", dependencies=[Depends(auth)])
-async def chat(request: Request):
+@app.post("/v1/chat/completions")
+async def chat(request: Request, user: str = Depends(auth)):
     body = await request.json()
     msgs = [m for m in body.get("messages", []) if m.get("role") in ("system", "developer", "user", "assistant")]
     if not msgs or msgs[-1]["role"] != "user":
@@ -163,24 +231,34 @@ async def chat(request: Request):
     text = text_of(msgs[-1].get("content"))
     effort = body.get("reasoning_effort") or ""
 
-    thread_id = threads.get(history_key(msgs[:-1]))
-    resp = await open_turn(thread_id, text, effort) if thread_id else None
-    if resp is None:
-        instructions = "\n\n".join(text_of(m.get("content")) for m in msgs if m["role"] in ("system", "developer"))
-        convo = [m for m in msgs[:-1] if m["role"] in ("user", "assistant")]
-        thread_id = await new_thread(instructions)
-        resp = await open_turn(thread_id, with_history(convo, text), effort)
+    thread_id = threads.get(history_key(user, msgs[:-1]))
+
+    async def once(t: str) -> AsyncIterator[str]:
+        yield t
+
+    if text.strip() in ("/skills", "／skills"):   # 列出 skills，不送給模型
+        source = once(skills_help(await list_skills(user)))
+    else:
+        skills = await mentioned_skills(user, text)
+        resp = await open_turn(thread_id, text, effort, skills) if thread_id else None
         if resp is None:
-            raise HTTPException(502, "剛開的對話找不到")
+            instructions = "\n\n".join(text_of(m.get("content")) for m in msgs if m["role"] in ("system", "developer"))
+            convo = [m for m in msgs[:-1] if m["role"] in ("user", "assistant")]
+            thread_id = await new_thread(user, instructions)
+            resp = await open_turn(thread_id, with_history(convo, text), effort, skills)
+            if resp is None:
+                raise HTTPException(502, "剛開的對話找不到")
+        source = replies(resp)
 
     cid, created = f"chatcmpl-{uuid.uuid4().hex}", int(time.time())
     base = {"id": cid, "created": created, "model": MODEL_ID}
 
     def done(reply: str) -> None:
-        remember(history_key(msgs + [{"role": "assistant", "content": reply}]), thread_id)
+        if thread_id:   # /skills 夾在對話中間也不會讓下一句對不上
+            remember(history_key(user, msgs + [{"role": "assistant", "content": reply}]), thread_id)
 
     if not body.get("stream"):
-        reply = "".join([t async for t in replies(resp)])
+        reply = "".join([t async for t in source])
         done(reply)
         return {**base, "object": "chat.completion",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
@@ -194,7 +272,7 @@ async def chat(request: Request):
     async def stream() -> AsyncIterator[str]:
         parts: list[str] = []
         yield chunk({"role": "assistant", "content": ""})
-        async for t in replies(resp):
+        async for t in source:
             if not t:
                 yield ": keepalive\n\n"
                 continue
@@ -213,8 +291,11 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8766)
     a = ap.parse_args()
-    if a.host not in ("127.0.0.1", "localhost") and not TOKEN:
-        sys.exit("對外開放（--host 不是本機）一定要設 CODEX_GATEWAY_TOKEN，否則任何人都能在這台電腦執行指令")
+    if a.host not in ("127.0.0.1", "localhost") and not USERS:
+        sys.exit("對外開放（--host 不是本機）一定要設 CODEX_GATEWAY_USERS 或 CODEX_GATEWAY_TOKEN，"
+                 "否則任何人都能在這台電腦執行指令")
+    if WORKSPACE_ROOT:
+        print(f"多人模式：{', '.join(USERS)}，工作資料夾在 {WORKSPACE_ROOT}")
     print(f"OpenAI gateway: http://{a.host}:{a.port}/v1  →  {AGENT_URL}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="info")
 

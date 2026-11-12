@@ -176,7 +176,7 @@ Codex 自己的對話紀錄在 `~/.codex/sessions/`。
 
 ```bash
 python codex_agent_server.py                                   # 照常啟動，不用開放給外面
-CODEX_GATEWAY_TOKEN=換成一串亂碼 \
+CODEX_GATEWAY_TOKEN=pwd \
 LLM_BASE_URL=http://192.168.31.120:8080/v1 LLM_MODEL=strata \
 CODEX_GATEWAY_CWD=/path/to/project \
 python openai_gateway.py --host 0.0.0.0
@@ -187,13 +187,64 @@ python openai_gateway.py --host 0.0.0.0
 | 欄位 | 值 |
 |---|---|
 | Base URL | `http://<這台IP>:8766/v1` |
-| API key | `CODEX_GATEWAY_TOKEN` 的值 |
+| API key | 發給他的 token |
 | 模型 | `codex-agent` |
 
-- **token 必填**：`--host` 不是本機時，沒設 `CODEX_GATEWAY_TOKEN` 就不給啟動。
+### 在對方的對話框使用 skills
+
+- **列出 skills**：訊息只打 `/skills`，會直接回覆可用的 skills 清單。這個回覆由 gateway 產生，不經過模型，也不佔排隊。
+- **指定 skill**：訊息裡打 `$名稱`，例如 `$review-agent 幫我審查最近的修改`。名稱對得到的，會明確指定 Codex 使用那個 skill，跟網頁的 `/` 選單一樣；對不到的就當普通文字。一次可以指定好幾個。
+- **不指定也可以**：Codex 看得到所有 skills，會自己判斷要不要用。
+
+### 多人使用：每人一個 token 和資料夾
+
+建一個名單檔 `gateway_users.json`（已在 .gitignore，不會被 commit）：
+
+```json
+{ "alice": "至少16字的亂碼-aaaa", "bob": "至少16字的亂碼-bbbb" }
+```
+
+```bash
+CODEX_GATEWAY_USERS=gateway_users.json CODEX_GATEWAY_CWD=/srv/codex-workspaces python openai_gateway.py --host 0.0.0.0
+```
+
+- **自動分資料夾**：gateway 依 token 認人，alice 的對話都在 `CODEX_GATEWAY_CWD/alice/` 裡工作，資料夾會自動建立。`CODEX_GATEWAY_CWD` 沒設時是專案裡的 `workspaces/`。
+- **對話不互通**：alice 和 bob 的對話各自分開，就算送一樣的歷史也不會接到對方的。
+- **新增或移除人**：改名單檔後重啟 gateway。
+- **名單格式**：名稱只能用英數字、`_`、`-`；token 至少 16 字且不能重複，不符合就拒絕啟動。
+- **只有一組 token 時**：可以改用 `CODEX_GATEWAY_TOKEN=...`，不分資料夾，工作資料夾就是 `CODEX_GATEWAY_CWD`。
+- ⚠️ **沙盒只限制寫入、不限制讀取**：Codex 讀得到執行帳號能讀的所有檔案，包括別人的資料夾。所以要用專用帳號跑（見下一節），讓它至少讀不到你的檔案。
+
+### 用專用帳號跑（Windows）
+
+1. 用系統管理員開 PowerShell，建一個**一般使用者**帳號（不要加進 Administrators）：
+   ```powershell
+   net user codex-svc <密碼> /add
+   ```
+2. 專案放在 `codex-svc` 讀得到的位置，例如 `C:\codex-agent`，**不要放在你自己的 `C:\Users\<你>` 底下**。Python 選「為所有使用者安裝」，套件用 `codex-svc` 身分裝一次。
+3. 用 `codex-svc` 身分開一個視窗，在裡面啟動兩個服務：
+   ```powershell
+   runas /user:codex-svc powershell
+   # 在新視窗裡：
+   cd C:\codex-agent
+   pip install -r requirements.txt
+   Start-Process python codex_agent_server.py
+   $env:CODEX_GATEWAY_USERS="gateway_users.json"; $env:CODEX_GATEWAY_CWD="C:\codex-workspaces"
+   $env:LLM_BASE_URL="http://192.168.31.120:8080/v1"; $env:LLM_MODEL="strata"
+   python openai_gateway.py --host 0.0.0.0
+   ```
+4. 防火牆只開 8766，8765 不要開。要開機自動啟動，就用「工作排程器」設定以 `codex-svc` 身分執行，並勾選「不論使用者登入與否均執行」。
+
+Windows 預設只有本人和系統管理員能讀 `C:\Users\<你>`，所以一般帳號的 `codex-svc` 讀不到你的檔案。但 `D:\` 這類其他磁碟，以及 `C:\` 底下自己建的資料夾，預設通常 Users 群組都讀得到，有機密資料的話要另外調整權限。`codex-svc` 也有自己的 `C:\Users\codex-svc\.codex`，skills 和設定要另外放一份進去。
+
+Linux 的作法相同：`sudo useradd -m codex-svc`，再用 `sudo -u codex-svc -H` 啟動兩個服務。
+
+### 其他說明
+
+- **token 必填**：`--host` 不是本機時，`CODEX_GATEWAY_USERS` 和 `CODEX_GATEWAY_TOKEN` 都沒設就不給啟動。
 - **對話自動對應**：同一段對話接著問會沿用同一個 Codex 對話，只送最後一句。改過舊訊息、gateway 或後端重啟過，就開新對話，並把先前的內容當參考一起送。
 - **核准由 Codex 自己決定**：固定用 `auto_review`，不會跳出卡片。對方只會看到回覆文字，看不到指令執行過程。
-- **一次只跑一個回合**：別人正在用時會回 **429**，大部分 chat UI 會顯示「請稍後再試」。
+- **一次只跑一個回合**：所有人共用一個佇列，別人正在用時會回 **429**，大部分 chat UI 會顯示「請稍後再試」。
 - **斷線就中止**：對方中途關掉，這個回合會跟著中止。
 - **其他環境變數**：`CODEX_GATEWAY_SANDBOX`（預設 workspace-write）、`CODEX_AGENT_URL`（預設 `http://127.0.0.1:8765`）、`LLM_API_KEY`。沒設 `LLM_BASE_URL` 的話，要先在網頁上連線。
 - **忽略的參數**：`temperature`、`tools`、圖片這類 OpenAI 參數。

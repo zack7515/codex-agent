@@ -1,2 +1,4 @@
 .agent/
 __pycache__/
+workspaces/
+gateway_users.json
