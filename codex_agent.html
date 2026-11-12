@@ -1,0 +1,1336 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Agent</title>
+<link rel="icon" href="data:,">
+<style>
+  /* 版面參考 Codex 網頁版 / Claude Code 桌面版：左側歷史、中間對話、右側設定、下方 composer。
+     側欄只做設定，不參與實際操作。 */
+  [hidden] { display: none !important; }
+  :root {
+    --bg: #151618; --rail: #17191b; --panel: #1c1e21; --ink: #e8e7e4; --muted: #8b9098;
+    --line: #2a2c31; --accent: #d97757; --accent-ink: #1b1210;
+    --good: #78c88e; --warn: #e0b06a; --bad: #ef7a6d;
+    --code: #1f2124; --chip: #222427;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Segoe UI", "Noto Sans TC", "PingFang TC", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f6f4; --rail: #f1f0ec; --panel: #ffffff; --ink: #1e2023; --muted: #6c7178;
+      --line: #e2e0da; --accent: #b5583d; --accent-ink: #ffffff;
+      --good: #1f7a4d; --warn: #a15c07; --bad: #b42318;
+      --code: #f1f0ec; --chip: #eceae4;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.6 var(--sans); }
+
+  header { display: flex; align-items: center; gap: 10px; height: 54px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--rail); }
+  .mark { width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--accent); color: var(--accent); display: grid; place-items: center; font-family: var(--mono); font-size: 13px; }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .01em; white-space: nowrap; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header a { color: var(--muted); font-size: 12px; text-decoration: none; }
+  header a:hover { color: var(--accent); }
+  header .grow { flex: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .pill.on { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }
+  .pill.on .dot { background: var(--good); }
+  .pill.bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .pill.bad .dot { background: var(--bad); }
+  .pill.wait .dot { background: var(--warn); }
+
+  .shell { display: flex; align-items: flex-start; max-width: 1400px; margin: 0 auto; }
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 20px 20px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolbar .grow { flex: 1; }
+  .usage { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+  #timeline { overflow: auto; min-height: 40vh; max-height: calc(100vh - 250px); padding: 4px 2px; }
+  .empty { color: var(--muted); text-align: center; padding: 60px 10px; }
+  .item { margin-bottom: 14px; }
+  .item .head { display: flex; gap: 8px; align-items: center; font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 0 0 5px; }
+  .item .head b { color: var(--ink); font-weight: 600; }
+  .item .body { font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .item.user .head b { color: var(--accent); }
+  .item.err .head b { color: var(--bad); }
+  .item pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+  .item details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  /* Codex 回覆的 Markdown */
+  .item .body.md { white-space: normal; }
+  .md p { margin: 0 0 8px; } .md p:last-child { margin-bottom: 0; }
+  .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; font-size: 14.5px; }
+  .md ul, .md ol { margin: 0 0 8px; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md code { font-family: var(--mono); font-size: 12.5px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+  .md pre.code { background: var(--code); padding: 9px 11px; border-radius: 7px; margin: 0 0 8px; max-height: 480px; }
+  .md blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted); }
+  .md table { border-collapse: collapse; margin: 0 0 8px; font-size: 13px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+  .md a { color: var(--accent); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+  /* Codex 要你核准或回答的卡片 */
+  .item.ask { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--warn) 7%, transparent); }
+  .item.ask .head b { color: var(--warn); }
+  .item.ask.done { border-color: var(--line); background: none; }
+  .item.ask .body { white-space: normal; }
+  .item.ask pre { background: var(--code); padding: 7px 9px; border-radius: 6px; margin: 4px 0; }
+  .ask .meta { color: var(--muted); font-size: 12.5px; margin: 2px 0; }
+  .ask fieldset { border: 0; padding: 0; margin: 8px 0 10px; }
+  .ask legend { font-weight: 600; padding: 0; }
+  .ask .opt { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0; cursor: pointer; }
+  .ask .opt input { margin-top: 4px; }
+  .ask .opt small { color: var(--muted); display: block; }
+  .ask input[type=text], .ask input[type=password] { width: 100%; margin-top: 4px; }
+  .tag { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--chip); }
+  .tag.good { color: var(--good); } .tag.bad { color: var(--bad); } .tag.warn { color: var(--warn); }
+  .diff .add { color: var(--good); } .diff .del { color: var(--bad); }
+  .turnline { font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 6px 0; border-top: 1px dashed var(--line); }
+
+  .counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .hit { font-family: var(--mono); font-size: 11.5px; padding: 6px 0; border-top: 1px dashed var(--line); }
+
+  .composer { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 12px 14px; }
+  .composer textarea { width: 100%; min-height: 92px; border: 0; background: transparent; color: var(--ink); font: 14px/1.6 var(--sans); resize: vertical; }
+  .composer textarea:focus { outline: none; }
+  .composer { position: relative; }
+  /* 輸入框打 / 跳出的選單 */
+  .slash { position: absolute; left: 10px; right: 10px; bottom: calc(100% - 4px); max-height: 320px; overflow-y: auto; z-index: 20;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.28); padding: 4px; }
+  .slash .grp { font-size: 11px; color: var(--muted); padding: 6px 10px 2px; }
+  .slash .opt { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; border-radius: 7px; cursor: pointer; }
+  .slash .opt.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .slash .opt b { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+  .slash .opt span { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slash .none { color: var(--muted); font-size: 12.5px; padding: 8px 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 12px; padding: 2px 4px 2px 9px; border-radius: 999px;
+          color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .chip button { border: 0; background: none; color: inherit; padding: 0 4px; cursor: pointer; font-size: 12px; }
+  .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+  .chip { font-family: var(--mono); font-size: 11.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--muted); }
+  .chip b { color: var(--accent); font-weight: 600; }
+
+  .sidebar { flex: 0 0 360px; order: -1; align-self: stretch; min-height: calc(100vh - 54px); max-height: calc(100vh - 54px); overflow: auto; background: var(--rail); border-right: 1px solid var(--line); padding: 14px 14px 20px; }
+  @media (max-width: 980px) {
+    .shell { display: block; }
+    .chat { padding: 12px 14px 18px; }
+    .sidebar { position: fixed; inset: 54px auto 0 0; width: min(360px, 92vw); z-index: 10; box-shadow: 0 12px 30px rgba(0, 0, 0, .25); }
+  }
+  .sidebar.hidden { display: none; }
+  .side-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12.5px; color: var(--muted); }
+  .sec { border-top: 1px solid var(--line); padding: 10px 2px 12px; }
+  .sec > summary { cursor: pointer; font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input[type=text], input[type=password], input[type=number], select, textarea { width: 100%; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); margin-top: 8px; }
+  .check input { width: auto; }
+  button { font: inherit; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .result { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; background: var(--code); border-radius: 7px; padding: 8px; margin-top: 10px; max-height: 200px; overflow: auto; display: none; }
+  .result.show { display: block; }
+  .result.ok { border-left: 3px solid var(--good); } .result.err { border-left: 3px solid var(--bad); }
+  .tid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+
+  /* 設定頁（側欄）與簡潔主欄的專用樣式 */
+  .side-title { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
+  .step { display: flex; gap: 8px; align-items: center; margin: 7px 0; font-size: 13px; }
+  .step .num { flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-family: var(--mono); font-size: 11px; }
+  button.big { width: 100%; font-size: 14px; padding: 9px 12px; border-radius: 10px; }
+  .adv { border-top: 1px solid var(--line); padding-top: 10px; }
+  .adv > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+  .send-row { display: flex; gap: 10px; align-items: center; }
+  .send-row input { flex: 1; min-width: 120px; }
+#schemaBox { display: none; }
+#schemaBox.show { display: block; }
+  /* ===== 第三版版面：左＝歷史對話、中＝實際對話、右＝設定 ===== */
+  .shell { display: grid; grid-template-columns: var(--histw, 240px) minmax(0, 1fr) var(--settw, 330px); height: calc(100vh - 54px); max-width: none; }
+  .shell.no-side { grid-template-columns: var(--histw, 240px) minmax(0, 1fr); }
+  .hist { height: 100%; overflow: auto; background: var(--rail); border-right: 1px solid var(--line); padding: 12px 12px 18px; }
+  .sidebar { flex: none; order: 0; height: 100%; min-height: 0; border-right: 0; border-left: 1px solid var(--line); }
+  .hist .t { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 7px 8px; border-radius: 9px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+  .hist .t:hover { background: var(--chip); color: var(--ink); }
+  .hist .t.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .hist .when { font-family: var(--mono); font-size: 10.5px; color: var(--muted); padding: 0 8px 8px; }
+  .chat { height: 100%; min-height: 0; padding: 12px 18px 16px; }
+  #timeline { flex: 1; min-height: 0; max-height: none; }
+
+  /* 對話框上面的圓圈：這輪對話用了多少 context */
+  .ctxbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .ring { position: relative; width: 42px; height: 42px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--chip); flex: 0 0 42px; }
+  .ring svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring circle.bg { fill: none; stroke: var(--line); stroke-width: 3; }
+  .ring circle.fg { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; transition: stroke-dashoffset .3s; }
+  .ring.warn circle.fg { stroke: var(--warn); }
+  .ring.bad circle.fg { stroke: var(--bad); }
+  .ring .pct { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--mono); font-size: 10.5px; color: var(--ink); }
+  .ctxmeta { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .ctxmeta b { color: var(--ink); font-size: 12.5px; }
+  #ctxPanel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 12px 12px; margin-bottom: 10px; display: none; }
+  #ctxPanel.show { display: block; }
+  #ctxResult { max-height: 140px; }
+  @media (max-width: 1100px) {
+    .shell, .shell.no-side { display: block; height: auto; }
+    .hist, .sidebar { height: auto; max-height: 45vh; position: static; inset: auto; width: auto; z-index: auto; box-shadow: none; }
+    .chat { height: auto; }
+    #timeline { min-height: 40vh; }
+  }  /* 收折：只用 ‹ / ›，只改版面，不會影響任何實際操作 */
+  .shell.fold-h { --histw: 44px; }
+  .shell.fold-s { --settw: 44px; }
+  .foldbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .foldbar .side-title { margin: 0; }
+  .fold { width: 26px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--chip); color: var(--ink); font-family: var(--mono); font-size: 13px; }
+  .fold:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .hist.folded, .sidebar.folded { padding: 12px 6px; }
+  .hist.folded .panel-body, .sidebar.folded .panel-body, .hist.folded .side-title, .sidebar.folded .side-title { display: none; }
+  .ctxbar .lbl { margin: 0 0 0 auto; white-space: nowrap; }
+  .ctxbar select { width: auto; min-width: 92px; }
+  .hist .hrow { display: flex; align-items: center; gap: 6px; }
+  .hist .hrow .t { flex: 1; min-width: 0; }
+  .hist .ops { display: flex; gap: 4px; flex: 0 0 auto; }
+  .hist .ops button { width: 22px; height: 22px; padding: 0; font-size: 12px; }
+  .hist .ops button:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="mark">C</span>
+  <h1>Codex Agent</h1>
+  <span class="grow"></span>
+  <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">未連線</span></span>
+</header>
+
+<main class="shell" id="shell">
+  <!-- 左：歷史對話列表。用標題就好，thread id 不用給使用者看 -->
+  <aside class="hist" id="hist">
+    <div class="foldbar">
+      <button class="fold" id="histFold" title="收折歷史">‹</button>
+      <span class="side-title">歷史對話</span>
+    </div>
+    <div class="panel-body">
+    <div class="btns" style="margin:0 0 10px">
+      <button id="btnNew" class="primary big">新對話</button>
+      <button id="btnRefresh">重新整理</button>
+    </div>
+    <div id="histList"><p class="hint">還沒有歷史。</p></div>
+    </div>
+  </aside>
+
+  <!-- 中：實際使用的地方，保持簡潔 -->
+  <section class="chat">
+    <div id="timeline"><div class="empty">打任務按「送出」就好：程式會自己連線、自己開新對話。</div></div>
+
+    <div class="composer">
+      <div class="ctxbar">
+        <button class="ring" id="ctxRing" title="這輪對話的 context 用量">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle class="bg" cx="18" cy="18" r="15"></circle>
+            <circle class="fg" id="ctxArc" cx="18" cy="18" r="15"></circle>
+          </svg>
+          <span class="pct" id="ctxPct">0%</span>
+        </button>
+        <div class="ctxmeta">
+          <b>這輪對話的 context</b>
+          <div id="ctxLine">還沒有用量。</div>
+        </div>
+        <label class="lbl" for="effort">思考強度</label>
+        <select id="effort">
+          <option value="none">關閉</option><option value="low">low</option>
+          <option value="medium" selected>medium（預設）</option>
+          <option value="high">high</option><option value="xhigh">xhigh</option>
+        </select>
+      </div>
+
+      <div id="ctxPanel">
+        <p class="hint" style="margin-top:0">快滿的時候可以手動壓縮；Codex 也會自己壓縮。</p>
+        <button id="btnCompact" class="primary big" disabled>壓縮這輪對話</button>
+        <p class="hint">用量：<span id="usage"></span></p>
+        <div id="ctxResult" class="result"></div>
+      </div>
+
+      <div id="slashMenu" class="slash" role="listbox" hidden></div>
+      <div id="skillChips" class="chips" hidden></div>
+      <textarea id="prompt" placeholder="打任務，Enter 送出，Shift+Enter 換行，打 / 找功能和 skills"
+                aria-autocomplete="list" aria-controls="slashMenu"></textarea>
+      <div class="send-row">
+        <button id="btnSend" class="primary big" disabled>送出</button>
+        <button id="btnInterrupt" class="danger" disabled>中斷</button>
+      </div>
+      <div class="send-row" id="steerRow" style="margin-top:8px" hidden>
+        <input id="steerText" type="text" placeholder="執行中補充指示（steer）">
+        <button id="btnSteer" disabled>補充</button>
+      </div>
+    </div>
+  </section>
+  <!-- 右：設定頁。設定都在這裡，按了不會送任務、也不會打斷正在跑的任務 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="foldbar">
+      <button class="fold" id="sidebarFold" title="收折設定">›</button>
+      <span class="side-title">設定</span>
+    </div>
+    <div class="panel-body">
+
+    <details class="sec" open>
+      <summary>開始</summary>
+      <p class="hint" style="margin-top:0">正常情況只要打任務按「送出」：程式會自己連線、自己開新對話。下面這幾顆是連線不對時才用。</p>
+      <div class="btns">
+        <button id="btnPing" class="primary big">測試連線</button>
+        <button id="btnConnect" class="primary big">啟動 Codex</button>
+        <button id="btnDisconnect" class="danger" disabled>停止</button>
+        <button id="btnClear" title="只清中間的顯示，左邊紀錄還在">清空畫面</button>
+      </div>
+      <div id="connResult" class="result"></div>
+    </details>
+
+    <details class="sec">
+      <summary>連線設定</summary>
+      <label for="baseUrl">Base URL（含 /v）</label>
+      <input id="baseUrl" type="text" value="http://192.168.1.50:8080/v1">
+      <label for="apiKey">API key（伺服器沒設就留空）</label>
+      <input id="apiKey" type="password" autocomplete="off">
+      <div class="row">
+        <div><label for="model">模型名稱</label><input id="model" type="text" value="strata"></div>
+        <div><label for="ctx">上下文長度（預設 256K）</label><input id="ctx" type="number" value="262144" step="1024"></div>
+      </div>
+      <details class="adv">
+        <summary>進階（可不用改）</summary>
+        <div class="row">
+          <div><label for="wireApi">wire_api</label>
+            <select id="wireApi"><option value="responses">responses</option><option value="chat">chat</option></select></div>
+          <div><label for="idle">串流逾時（ms）</label><input id="idle" type="number" value="600000" step="10000"></div>
+        </div>
+        <label class="check"><input id="winUnelevated" type="checkbox"> Windows 沙盒用 unelevated</label>
+        <div class="btns"><button id="btnPingDeep">深度測試（比較久）</button></div>
+      </details>
+    </details>
+
+    <details class="sec">
+      <summary>新對話自動用的設定</summary>
+      <p class="hint" style="margin-top:0">這些是自動開新對話時會用的值，通常不用動。</p>
+      <label for="cwd">工作資料夾 cwd</label>
+      <input id="cwd" type="text" placeholder="留空＝用伺服器自己的資料夾">
+      <label for="sandbox">Sandbox</label>
+      <select id="sandbox">
+        <option value="read-only">read-only（只能讀）</option>
+        <option value="workspace-write" selected>workspace-write（可寫）</option>
+        <option value="full-access">full-access（無限制）</option>
+      </select>
+      <label for="approval">Approval</label>
+      <select id="approval">
+        <option value="ask_user" selected>詢問我（需要時跳出確認）</option>
+        <option value="auto_review">auto_review（自動審核）</option>
+        <option value="deny_all">deny_all（一律拒絕）</option>
+      </select>
+      <label for="devInstr">給模型的規則（會預填 .agent 的規則）</label>
+      <textarea id="devInstr" rows="4"></textarea>
+      <label class="check"><input id="ephemeral" type="checkbox"> 不保存歷史（ephemeral）</label>
+    </details>
+
+    <details class="sec">
+      <summary>本回合參數</summary>
+      <label for="turnSandbox">本回合 Sandbox</label>
+      <select id="turnSandbox">
+        <option value="">（沿用對話的設定）</option><option value="read-only">read-only</option>
+        <option value="workspace-write">workspace-write</option><option value="full-access">full-access</option>
+      </select>
+      <label class="check"><input id="useSchema" type="checkbox"> 要求 JSON Schema 輸出</label>
+      <div id="schemaBox">
+        <label for="schema">output_schema（JSON）</label>
+        <textarea id="schema" rows="6"></textarea>
+      </div>
+    </details>
+
+    </div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { skills: [], modelOk: null, modelDetail: "", connected: false, threadId: null, turnId: null, busy: false, items: new Map(), asks: new Map() };
+
+const DEFAULT_SCHEMA = {
+  type: "object",
+  properties: { files: { type: "array", items: { type: "string" } }, summary: { type: "string" } },
+  required: ["files", "summary"],
+  additionalProperties: false
+};
+$("schema").value = JSON.stringify(DEFAULT_SCHEMA, null, 2);
+
+/* 設定存在瀏覽器 localStorage */
+const SAVE_IDS = ["baseUrl", "model", "ctx", "wireApi", "idle", "cwd", "sandbox", "approval", "devInstr", "effort", "turnSandbox"];
+try {
+  const saved = JSON.parse(localStorage.getItem("codexAgentUI") || "{}");
+  for (const id of SAVE_IDS) if (saved[id] !== undefined) $(id).value = saved[id];
+  if (!$("effort").value) $("effort").value = "medium";   // 舊版存的「預設」是空字串
+  if (saved.v !== 2) $("approval").value = "ask_user";     // 舊版預設是 deny_all，升級時改成詢問我
+  if (saved.winUnelevated !== undefined) $("winUnelevated").checked = saved.winUnelevated;
+  else $("winUnelevated").checked = navigator.userAgent.includes("Windows");
+} catch { $("winUnelevated").checked = navigator.userAgent.includes("Windows"); }
+function saveSettings() {
+  try {
+    const data = { v: 2, winUnelevated: $("winUnelevated").checked };
+    for (const id of SAVE_IDS) data[id] = $(id).value;
+    localStorage.setItem("codexAgentUI", JSON.stringify(data));
+  } catch { /* 無法保存就算了 */ }
+}
+
+/* 收折只用 ‹ / ›，只改版面，不會影響任何實際操作 */
+function foldPanel(side, folded) {
+  const el = $(side);
+  if (!el) return;
+  $("shell").classList.toggle(side === "hist" ? "fold-h" : "fold-s", folded);
+  el.classList.toggle("folded", folded);
+  const btn = $(side + "Fold");
+  if (btn) btn.textContent = folded ? (side === "hist" ? "›" : "‹") : (side === "hist" ? "‹" : "›");
+  const st = { hist: $("hist").classList.contains("folded"), set: $("sidebar").classList.contains("folded") };
+  try { localStorage.setItem("codexAgentFold", JSON.stringify(st)); } catch { /* 忽略 */ }
+}
+function setSidebar(hidden) { foldPanel("sidebar", hidden); }
+$("sidebarFold").onclick = () => foldPanel("sidebar", !$("sidebar").classList.contains("folded"));
+$("histFold").onclick = () => foldPanel("hist", !$("hist").classList.contains("folded"));
+let FOLD = { hist: false, set: false };
+try { FOLD = Object.assign(FOLD, JSON.parse(localStorage.getItem("codexAgentFold") || "{}")); } catch { /* 忽略 */ }
+try { if (localStorage.getItem("codexAgentSide") === "1") FOLD.set = true; } catch { /* 忽略 */ }
+foldPanel("hist", FOLD.hist);
+setSidebar(FOLD.set);
+
+/* ---------- 共用 ---------- */
+async function api(path, body, method) {
+  const res = await fetch(path, {
+    method: method || (body ? "POST" : "GET"),
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data;
+  try { data = await res.json(); } catch { data = { ok: false, error: `HTTP ${res.status}` }; }
+  if (!res.ok && data.detail) data = { ok: false, error: data.detail };
+  return data;
+}
+function show(el, data, ok) {
+  el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  el.className = "result show " + (ok ? "ok" : "err");
+}
+function connPayload() {
+  return {
+    base_url: $("baseUrl").value.trim(),
+    api_key: $("apiKey").value,
+    model: $("model").value.trim() || "strata",
+    context_window: parseInt($("ctx").value, 10) || 262144,
+    wire_api: $("wireApi").value,
+    stream_idle_timeout_ms: parseInt($("idle").value, 10) || 600000,
+    windows_unelevated: $("winUnelevated").checked,
+  };
+}
+function threadPayload() {
+  return {
+    cwd: $("cwd").value.trim(),
+    sandbox: $("sandbox").value,
+    approval_mode: $("approval").value,
+    developer_instructions: $("devInstr").value || SCRATCH_RULE,
+    ephemeral: $("ephemeral").checked,
+  };
+}function refreshButtons() {
+  const c = state.connected, t = !!state.threadId, b = state.busy;
+  $("btnDisconnect").disabled = !c;
+  $("btnCompact").disabled = !t || b;
+  $("btnSend").disabled = b;
+  $("btnInterrupt").disabled = !state.turnId;
+  $("btnSteer").disabled = !state.turnId;
+  $("steerRow").hidden = !b;
+  $("btnInterrupt").hidden = !b;
+  const pill = $("statusPill");
+  const elapsed = b && state.t0 ? ` ${((performance.now() - state.t0) / 1000).toFixed(1)}s` : "";
+  let text, cls;
+  if (!c) [text, cls] = ["未連線", ""];
+  else if (state.modelOk === false) [text, cls] = ["模型伺服器連不上", " bad"];
+  else if (state.asks.size) [text, cls] = ["等你回答", " wait"];
+  else if (b) [text, cls] = [`正在跑…${elapsed}`, " on"];
+  else if (state.modelOk === null) [text, cls] = ["檢查模型伺服器…", " wait"];
+  else [text, cls] = [t ? "可以送任務了" : "已連線", " on"];
+  $("statusText").textContent = text;
+  pill.className = "pill" + cls;
+  pill.title = state.modelOk === false ? "連不上模型伺服器：" + state.modelDetail + "\n到右邊「連線設定」檢查 Base URL，或按「測試連線」" : "";
+}
+
+/* ---------- 狀態燈：定期確認模型伺服器真的連得到 ---------- */
+async function checkHealth() {
+  if (state.busy) return;   // 跑任務時不打擾模型伺服器
+  const h = await api("/api/health");
+  if (h.error) { state.connected = false; state.modelOk = null; refreshButtons(); return; }
+  const was = state.modelOk;
+  state.connected = !!h.connected;
+  state.modelOk = h.connected ? !!h.model_ok : null;
+  state.modelDetail = h.detail || "";
+  if (h.connected && was !== false && state.modelOk === false)
+    addTurnLine(`模型伺服器連不上（${h.url}：${state.modelDetail}）。到右邊「連線設定」檢查 Base URL，或按「測試連線」。`);
+  if (was === false && state.modelOk) addTurnLine("模型伺服器恢復連線。");
+  refreshButtons();
+}
+setInterval(checkHealth, 30000);
+
+/* ---------- 設定 · 連線 ---------- */
+async function doPing(deep) {
+  saveSettings();
+  show($("connResult"), deep ? "深度測試中…（會實際生成幾個 token，可能數十秒）" : "測試中…", true);
+  const r = await api("/api/ping" + (deep ? "?deep=true" : ""), connPayload());
+  if (r.error) { show($("connResult"), r.error, false); return; }
+  const parts = [];
+  for (const [name, x] of Object.entries(r)) {
+    if (!x || typeof x !== "object") continue;   // 跳過最外層的 ok
+    const hint = x.status === 401 ? "→ 401：API key 錯誤或沒填" :
+                 x.status === 403 ? "→ 403：可能被伺服器的 Host 檢查擋下，改用 IP 或設定 API key" :
+                 x.status === 404 && name === "responses" ? "→ 404：伺服器沒有 /responses，Codex（wire_api=responses）會無法使用" :
+                 x.status == null ? "→ 連不上：檢查 IP、port、伺服器是否聽 0.0.0.0、防火牆" : "";
+    let body = typeof x.body === "string" ? x.body : JSON.stringify(x.body, null, 2);
+    if (body && body.length > 1500) body = body.slice(0, 1500) + "\n…（已截斷）";
+    const ms = x.ms != null ? `  ${x.ms} ms` : "";
+    parts.push(`[${name}] HTTP ${x.status ?? "—"}${ms}  ${x.url}${hint ? "\n" + hint : ""}\n${body}`);
+  }
+  show($("connResult"), parts.join("\n\n"), r.ok);
+}
+$("btnPing").onclick = () => doPing(false);
+$("btnPingDeep").onclick = () => doPing(true);
+$("btnConnect").onclick = async () => {
+  saveSettings();
+  show($("connResult"), "啟動 codex app-server 中…（第一次可能較久）", true);
+  $("btnConnect").disabled = true;
+  const r = await api("/api/connect", connPayload());
+  $("btnConnect").disabled = false;
+  state.connected = !!r.ok;
+  state.threadId = null; state.turnId = null; SKILLS = null;
+  show($("connResult"), r.ok ? { metadata: r.metadata, config_overrides: r.overrides } : r.error, r.ok);
+  state.modelOk = null;
+  refreshButtons();
+  if (r.ok) checkHealth();
+};
+$("btnDisconnect").onclick = async () => {
+  await api("/api/disconnect", {});
+  state.connected = false; state.threadId = null; state.turnId = null; state.modelOk = null;
+  show($("connResult"), "已停止 Codex", true);
+  refreshButtons();
+};
+
+/* ---------- 設定 · Thread ---------- */
+function setThread(id, note) {
+  state.threadId = id;
+  addTurnLine(note);
+  rememberThread(id);
+  resetRing();
+  refreshButtons();
+}
+/* ---------- Markdown（只支援常用語法；先跳脫 HTML，連結只允許 http/https） ---------- */
+function esc(t) { return t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function mdInline(t) {
+  return t.split("`").map((part, i) => {
+    if (i % 2) return "<code>" + esc(part) + "</code>";
+    return esc(part)
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, "$1<i>$2</i>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  }).join("");
+}
+const MD_LIST = /^\s*([-*+]|\d+[.)])\s+/;
+const MD_BLOCK = /^\s*(```|#{1,4}\s|>|\|)/;
+function md(src) {
+  const L = String(src || "").replace(/\r/g, "").split("\n"), out = [];
+  let i = 0;
+  while (i < L.length) {
+    const l = L[i];
+    if (/^\s*```/.test(l)) {
+      const buf = []; i++;
+      while (i < L.length && !/^\s*```/.test(L[i])) buf.push(L[i++]);
+      i++; out.push('<pre class="code">' + esc(buf.join("\n")) + "</pre>"); continue;
+    }
+    const h = l.match(/^(#{1,4})\s+(.*)/);
+    if (h) { const n = h[1].length + 2; out.push(`<h${n}>${mdInline(h[2])}</h${n}>`); i++; continue; }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (MD_LIST.test(l)) {
+      const tag = /^\s*\d/.test(l) ? "ol" : "ul", items = [];
+      while (i < L.length && MD_LIST.test(L[i])) items.push(L[i++].replace(MD_LIST, ""));
+      out.push(`<${tag}>` + items.map((x) => `<li>${mdInline(x)}</li>`).join("") + `</${tag}>`); continue;
+    }
+    if (/^\s*>/.test(l)) {
+      const buf = [];
+      while (i < L.length && /^\s*>/.test(L[i])) buf.push(L[i++].replace(/^\s*>\s?/, ""));
+      out.push("<blockquote>" + buf.map(mdInline).join("<br>") + "</blockquote>"); continue;
+    }
+    if (/^\s*\|/.test(l)) {
+      const rows = [];
+      while (i < L.length && /^\s*\|/.test(L[i])) rows.push(L[i++]);
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => mdInline(c.trim()));
+      const body = rows.filter((r) => !/^\s*\|?[\s:|-]+\|?\s*$/.test(r));
+      out.push("<table>" + body.map((r, n) => "<tr>" + cells(r).map((c) => n ? `<td>${c}</td>` : `<th>${c}</th>`).join("") + "</tr>").join("") + "</table>");
+      continue;
+    }
+    if (!l.trim()) { i++; continue; }
+    const para = [l]; i++;
+    while (i < L.length && L[i].trim() && !MD_BLOCK.test(L[i]) && !MD_LIST.test(L[i])) para.push(L[i++]);
+    out.push("<p>" + para.map(mdInline).join("<br>") + "</p>");
+  }
+  return out.join("");
+}
+function setMarkdown(it, raw) {
+  it.raw = raw;
+  it.body.classList.add("md");
+  it.body.innerHTML = md(raw);
+}
+function appendMarkdown(it, delta) {
+  it.raw = (it.raw || "") + delta;
+  if (it.rafPending) return;   // 一個畫面幀最多重畫一次，長回覆才不會卡
+  it.rafPending = true;
+  requestAnimationFrame(() => { it.rafPending = false; setMarkdown(it, it.raw); scrollDown(); });
+}
+
+/* ---------- Codex 要求核准 / 跳出問題給你選 ---------- */
+function addMeta(it, label, value) {
+  if (!value) return;
+  const d = document.createElement("div"); d.className = "meta"; d.textContent = `${label}：${value}`;
+  it.body.appendChild(d);
+}
+function addPre(it, text) {
+  const pre = document.createElement("pre"); pre.textContent = text; it.body.appendChild(pre);
+}
+function finishAsk(rid, note, cls) {
+  const ask = state.asks.get(rid);
+  if (!ask) return;
+  state.asks.delete(rid);
+  ask.it.el.classList.add("done");
+  for (const el of ask.it.el.querySelectorAll("button, input")) el.disabled = true;
+  setTag(ask.it, note, cls);
+  refreshButtons();
+}
+async function answerAsk(rid, result, note) {
+  const r = await api(`/api/requests/${encodeURIComponent(rid)}`, { result });
+  finishAsk(rid, r.ok ? note : "回答失敗：" + r.error, r.ok ? "good" : "bad");
+}
+function askButtons(it, rid, choices) {
+  const row = document.createElement("div"); row.className = "btns";
+  for (const [label, result, cls] of choices) {
+    const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls;
+    b.onclick = () => answerAsk(rid, result, label);
+    row.appendChild(b);
+  }
+  it.body.appendChild(row);
+  const first = row.querySelector("button"); if (first) first.focus({ preventScroll: true });
+}
+function renderQuestions(it, rid, questions) {
+  const fields = [];
+  for (const q of questions || []) {
+    const fs = document.createElement("fieldset");
+    const lg = document.createElement("legend"); lg.textContent = q.header || q.id; fs.appendChild(lg);
+    const qt = document.createElement("div"); qt.textContent = q.question || ""; fs.appendChild(qt);
+    const name = rid + "_" + q.id;
+    for (const opt of q.options || []) {
+      const lab = document.createElement("label"); lab.className = "opt";
+      const r = document.createElement("input"); r.type = "radio"; r.name = name; r.value = opt.label;
+      const txt = document.createElement("span"); txt.textContent = opt.label;
+      if (opt.description) { const sm = document.createElement("small"); sm.textContent = opt.description; txt.appendChild(sm); }
+      lab.append(r, txt); fs.appendChild(lab);
+    }
+    let free = null;
+    if (q.isOther || !(q.options || []).length) {
+      free = document.createElement("input");
+      free.type = q.isSecret ? "password" : "text";
+      free.placeholder = (q.options || []).length ? "其他（自己輸入，會蓋過上面的選擇）" : "輸入你的回答";
+      fs.appendChild(free);
+    }
+    it.body.appendChild(fs);
+    fields.push({ q, name, free });
+  }
+  const row = document.createElement("div"); row.className = "btns";
+  const ok = document.createElement("button"); ok.className = "primary"; ok.textContent = "送出回答";
+  ok.onclick = () => {
+    const answers = {}, picked = [];
+    for (const f of fields) {
+      const typed = f.free && f.free.value.trim();
+      const sel = it.body.querySelector(`input[name="${CSS.escape(f.name)}"]:checked`);
+      const v = typed || (sel && sel.value) || "";
+      answers[f.q.id] = { answers: v ? [v] : [] };
+      if (v) picked.push(f.q.isSecret ? "••••" : v);
+    }
+    answerAsk(rid, { answers }, "已回答" + (picked.length ? "：" + picked.join("、") : ""));
+  };
+  const skip = document.createElement("button"); skip.textContent = "略過";
+  skip.onclick = () => answerAsk(rid, { answers: {} }, "已略過");
+  row.append(ok, skip); it.body.appendChild(row);
+}
+function renderAsk(p) {
+  const rid = p.requestId, prm = p.params || {};
+  let it;
+  const APPROVE = [["允許", { decision: "accept" }, "primary"], ["這次對話都允許", { decision: "acceptForSession" }],
+                   ["拒絕", { decision: "decline" }], ["拒絕並停止", { decision: "cancel" }, "danger"]];
+  switch (p.method) {
+    case "item/commandExecution/requestApproval":
+      it = makeItem("ask", "要執行指令，需要你同意", "等你決定", "warn");
+      if (prm.command) addPre(it, "$ " + prm.command);
+      addMeta(it, "資料夾", prm.cwd); addMeta(it, "原因", prm.reason);
+      askButtons(it, rid, APPROVE); break;
+    case "item/fileChange/requestApproval":
+      it = makeItem("ask", "要修改檔案，需要你同意（變更內容在上面）", "等你決定", "warn");
+      addMeta(it, "原因", prm.reason); addMeta(it, "要求可寫入的資料夾", prm.grantRoot);
+      askButtons(it, rid, APPROVE); break;
+    case "item/permissions/requestApproval":
+      it = makeItem("ask", "要求額外權限", "等你決定", "warn");
+      addMeta(it, "原因", prm.reason); addPre(it, JSON.stringify(prm.permissions || {}, null, 2));
+      askButtons(it, rid, [["允許這回合", { permissions: prm.permissions || {}, scope: "turn" }, "primary"],
+                           ["這次對話都允許", { permissions: prm.permissions || {}, scope: "session" }],
+                           ["拒絕", { permissions: {} }]]);
+      break;
+    case "item/tool/requestUserInput":
+      it = makeItem("ask", "Codex 想問你", "等你回答", "warn");
+      renderQuestions(it, rid, prm.questions); break;
+    default:
+      it = makeItem("ask", p.method, "等你決定", "warn");
+      addPre(it, JSON.stringify(prm, null, 2));
+      askButtons(it, rid, [["拒絕", { action: "decline" }]]);
+  }
+  state.asks.set(rid, { it });
+  scrollDown(true);
+  refreshButtons();
+  if (document.hidden) document.title = "（等你回答）Codex Agent";
+}
+function expireAsks(note) { for (const rid of [...state.asks.keys()]) finishAsk(rid, note, ""); }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "Codex Agent"; });
+
+/* ---------- 主欄對話畫面 ---------- */
+const timeline = $("timeline");
+function clearEmpty() { const e = timeline.querySelector(".empty"); if (e) e.remove(); }
+let stickBottom = true;   // 使用者往上捲在看舊內容時，不要一直被拉回底部
+timeline.addEventListener("scroll", () => {
+  stickBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
+});
+function scrollDown(force) { if (force || stickBottom) timeline.scrollTop = timeline.scrollHeight; }
+function addTurnLine(text) {
+  clearEmpty();
+  const d = document.createElement("div"); d.className = "turnline"; d.textContent = text;
+  timeline.appendChild(d); scrollDown();
+}
+function makeItem(cls, title, tagText, tagCls) {
+  clearEmpty();
+  const el = document.createElement("div"); el.className = "item " + cls;
+  const head = document.createElement("div"); head.className = "head";
+  const b = document.createElement("b"); b.textContent = title; head.appendChild(b);
+  const tag = document.createElement("span"); tag.className = "tag " + (tagCls || "");
+  tag.textContent = tagText || ""; if (!tagText) tag.style.display = "none";
+  head.appendChild(tag);
+  const body = document.createElement("div"); body.className = "body";
+  el.append(head, body); timeline.appendChild(el); scrollDown();
+  return { el, head, tag, body };
+}
+function setTag(it, text, cls) { it.tag.textContent = text; it.tag.className = "tag " + (cls || ""); it.tag.style.display = ""; }
+function renderDiff(diff) {
+  const pre = document.createElement("pre"); pre.className = "diff";
+  for (const line of (diff || "").split("\n")) {
+    const span = document.createElement("span");
+    if (line.startsWith("+") && !line.startsWith("+++")) span.className = "add";
+    else if (line.startsWith("-") && !line.startsWith("---")) span.className = "del";
+    span.textContent = line + "\n"; pre.appendChild(span);
+  }
+  return pre;
+}
+function addFold(it, label) {
+  const det = document.createElement("details");
+  const sum = document.createElement("summary"); sum.textContent = label;
+  const pre = document.createElement("pre");
+  det.append(sum, pre); it.body.appendChild(det);
+  it.fold = det; it.text = pre;
+}
+function getOrCreate(itemId, type, item) {
+  if (state.items.has(itemId)) return state.items.get(itemId);
+  let it;
+  if (type === "agentMessage") {
+    it = makeItem("agent", "Codex");
+  } else if (type === "reasoning") {
+    it = makeItem("reasoning", "thinking", "收折", "warn");
+    addFold(it, "思考的內容（按了展開）");
+  } else if (type === "commandExecution") {
+    it = makeItem("cmd", "$ " + (item?.command || "指令"), "執行中", "warn");
+    addFold(it, "輸出（按了展開）");
+  } else if (type === "fileChange") {
+    it = makeItem("file", "檔案變更", "處理中", "warn");
+  } else if (type === "mcpToolCall") {
+    it = makeItem("tool", `工具 ${item?.server || ""}/${item?.tool || ""}`, "呼叫中", "warn");
+    addFold(it, "參數與結果（按了展開）");
+  } else if (type === "userMessage") {
+    return null;   // 使用者訊息已在送出時顯示
+  } else {
+    it = makeItem("other", type || "item");
+  }
+  it.type = type;
+  state.items.set(itemId, it);
+  return it;
+}
+function completeItem(item) {
+  const it = getOrCreate(item.id, item.type, item); if (!it) return;
+  switch (item.type) {
+    case "agentMessage":
+      setMarkdown(it, item.text || it.raw || "");
+      if (item.phase) setTag(it, item.phase);
+      break;
+    case "reasoning": {
+      const t = [...(item.summary || []), ...(item.content || [])].join("\n");
+      if (t && !it.text.textContent) it.text.textContent = t;
+      break;
+    }
+    case "commandExecution": {
+      if (item.aggregatedOutput && !it.text.textContent) it.text.textContent = item.aggregatedOutput;
+      const code = item.exitCode;
+      setTag(it, code === 0 ? "exit 0" : code == null ? (item.status || "結束") : `exit ${code}`, code === 0 ? "good" : "bad");
+      break;
+    }
+    case "fileChange":
+      it.body.innerHTML = "";
+      for (const ch of item.changes || []) {
+        const p = document.createElement("div");
+        p.textContent = `${ch.kind?.type || ch.kind || ""}  ${ch.path}`;
+        it.body.append(p, renderDiff(ch.diff));
+      }
+      setTag(it, item.status || "完成", item.status === "failed" ? "bad" : "good");
+      break;
+    case "mcpToolCall":
+      (it.text || it.body).textContent = JSON.stringify(item.error || item.result || item.arguments, null, 2);
+      setTag(it, item.error ? "失敗" : "完成", item.error ? "bad" : "good");
+      break;
+    default:
+      it.body.textContent = JSON.stringify(item, null, 2);
+  }
+  scrollDown();
+}
+function updateUsage(u) {
+  if (!u) return;
+  drawRing(u);
+  const t = u.total || {}, ctx = u.modelContextWindow;
+  $("usage").textContent =
+    `in ${t.inputTokens ?? "-"}（快取 ${t.cachedInputTokens ?? 0}）· out ${t.outputTokens ?? "-"}` +
+    `（思考 ${t.reasoningOutputTokens ?? 0}）` + (ctx ? ` · 視窗 ${ctx}` : "");
+}
+
+function handleEvent(ev) {
+  const p = ev.payload || {};
+  switch (ev.method) {
+    case "agent/turnHandle":
+      state.turnId = p.turnId; refreshButtons(); break;
+    case "turn/started":
+      addTurnLine("回合開始"); break;
+    case "item/started":
+      if (p.item) getOrCreate(p.item.id, p.item.type, p.item); break;
+    case "item/agentMessage/delta": {
+      appendMarkdown(getOrCreate(p.itemId, "agentMessage"), p.delta); break;
+    }
+    case "item/reasoning/textDelta":
+    case "item/reasoning/summaryTextDelta": {
+      const it = getOrCreate(p.itemId, "reasoning"); it.text.textContent += p.delta; break;
+    }
+    case "item/commandExecution/outputDelta": {
+      const it = getOrCreate(p.itemId, "commandExecution");
+      it.text.textContent += p.delta;
+      if (!it.fold || it.fold.open) scrollDown();
+      break;
+    }
+    case "item/completed":
+      if (p.item) completeItem(p.item); break;
+    case "thread/tokenUsage/updated":
+      updateUsage(p.tokenUsage); break;
+    case "turn/completed": {
+      const turn = p.turn || {};
+      const sec = turn.durationMs ? `，${(turn.durationMs / 1000).toFixed(1)} 秒` : "";
+      addTurnLine(`回合結束：${turn.status || ""}${sec}`);
+      refreshHistory();
+      if (turn.error) { const it = makeItem("err", "錯誤", "error", "bad"); it.body.textContent = JSON.stringify(turn.error, null, 2); }
+      break;
+    }
+    case "agent/error": {
+      const it = makeItem("err", "後端錯誤", "error", "bad"); it.body.textContent = p.message; break;
+    }
+    case "thread/name/updated": {
+      const tid = p.threadId || state.threadId;
+      if (p.threadName && tid) {
+        TITLES[tid] = { t: p.threadName, at: (TITLES[tid] && TITLES[tid].at) || Math.floor(Date.now() / 1000) };
+        persistTitles();
+        renderHistory();
+      }
+      break;
+    }
+    case "agent/turnSummary": {
+      const fmt = (ms) => ms == null ? "—" : `${(ms / 1000).toFixed(2)}s`;
+      const line = `首事件 ${fmt(p.firstEventMs)} · 首 token ${fmt(p.firstDeltaMs)} · 總計 ${fmt(p.totalMs)}`;
+      addTurnLine("計時：" + line);
+      break;
+    }
+    case "agent/serverRequest":
+      renderAsk(p); break;
+    case "agent/streamClosed":
+      state.turnId = null; expireAsks("回合已結束，沒有回答"); break;
+    default:
+      if (ev.method.toLowerCase().includes("error")) {
+        const it = makeItem("err", ev.method, "error", "bad"); it.body.textContent = JSON.stringify(p, null, 2);
+      }
+  }
+}
+/* ---------- 左側歷史：用標題，不用 thread id ---------- */
+let TITLES = {};
+try { TITLES = JSON.parse(localStorage.getItem("codexAgentTitles") || "{}"); } catch { TITLES = {}; }
+function persistTitles() {
+  const keys = Object.keys(TITLES);
+  if (keys.length > 60) for (const k of keys.slice(0, keys.length - 60)) delete TITLES[k];
+  try { localStorage.setItem("codexAgentTitles", JSON.stringify(TITLES)); } catch { /* 儲存不了就算了 */ }
+}
+const SCRATCH_RULE = "中間產物一律寫入 .agent/；只有確定要留下的內容才寫到根目錄。一律用繁體中文回答。";
+function summarizeTitle(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const first = clean.split("[。！？；:]")[0] || clean;
+  return (first.length > 30 ? first.slice(0, 30) : first).slice(0, 46);
+}
+function saveTitle(id, text) {
+  if (!id) return;
+  if (!TITLES[id]) {
+    const t = summarizeTitle(text);
+    if (!t) return;
+    TITLES[id] = { t, p: String(text || "").slice(0, 400), at: Math.floor(Date.now() / 1000) };
+  }
+  persistTitles();
+}
+async function renameTitle(id) {
+  const cur = titleOf(HIST.find((x) => x.id === id) || { id });
+  const want = window.prompt("這個對話的標題要改成什麼？", cur);
+  if (!want) return;
+  const t = String(want).replace(/\s+/g, " ").trim().slice(0, 46);
+  if (!t) return;
+  const old = TITLES[id] || { p: "", at: Math.floor(Date.now() / 1000) };
+  TITLES[id] = { t, p: old.p || "", at: old.at || Math.floor(Date.now() / 1000) };
+  persistTitles();
+  if (state.connected) {
+    const r = await api(`/api/threads/${encodeURIComponent(id)}/name`, { text: t });
+    if (!r.ok) addTurnLine("標題只有存在瀏覽器裡（後端改不了：" + r.error + "）");
+  }
+  renderHistory();
+}
+async function delEntry(id) {
+  const name = titleOf(HIST.find((x) => x.id === id) || { id });
+  if (!window.confirm("把「" + name + "」從歷史裡刪掉？（Codex 那邊會歸到 archive，瀏覽器的標題也會清掉。）")) return;
+  delete TITLES[id];
+  persistTitles();
+  HIST = HIST.filter((x) => x.id !== id);
+  if (state.threadId === id) {
+    state.threadId = null; state.turnId = null; state.items.clear();
+    addTurnLine("剛刪掉的是現在的這輪，中間會變空。按左邊別的標題或打新任務就好。");
+  }
+  renderHistory();
+  if (state.connected) {
+    const r = await api(`/api/threads/${encodeURIComponent(id)}/archive`, {});
+    if (!r.ok) addTurnLine("後端沒歸檔成功：" + r.error);
+  }
+}
+function titleOf(t) {
+  const id = t.id || t;
+  const local = TITLES[id] && TITLES[id].t;
+  return t.name || local || String(t.preview || "").replace(/\s+/g, " ").slice(0, 46) || "對話 " + String(id).slice(0, 8);
+}
+let HIST = [];
+function renderHistory() {
+  const box = $("histList");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!HIST.length) {
+    box.innerHTML = '<p class="hint" style="margin-top:0">還沒有歷史。打任務按「送出」就會自動開新對話。</p>';
+    return;
+  }
+  for (const t of HIST) {
+    const b = document.createElement("button");
+    b.className = "t" + (t.id === state.threadId ? " on" : "");
+    b.textContent = titleOf(t);
+    b.title = "按了可以還原這輪對話";
+    b.onclick = () => openThread(t.id);
+    const row = document.createElement("div");
+    row.className = "hrow";
+    const ops = document.createElement("span");
+    ops.className = "ops";
+    const edit = document.createElement("button");
+    edit.textContent = "✏"; edit.title = "改標題"; edit.onclick = () => renameTitle(t.id);
+    const del = document.createElement("button");
+    del.textContent = "✕"; del.title = "從歷史刪掉"; del.onclick = () => delEntry(t.id);
+    ops.append(edit, del);
+    row.append(b, ops);
+    box.append(row);
+    const d = document.createElement("div");
+    d.className = "when";
+    d.textContent = t.at ? new Date(t.at * 1000).toLocaleString() : "";
+    if (d.textContent) box.append(d);
+  }
+}
+function rememberThread(id, text) {
+  if (!id) return;
+  saveTitle(id, text || "");
+  if (!HIST.some((x) => x.id === id)) HIST.unshift({ id, at: Math.floor(Date.now() / 1000) });
+  renderHistory();
+}
+function mergeLocal() {
+  for (const id of Object.keys(TITLES)) {
+    if (!HIST.some((x) => x.id === id)) HIST.push({ id, at: (TITLES[id] && TITLES[id].at) || 0 });
+  }
+  HIST.sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+async function refreshHistory() {
+  const r = await api("/api/threads");
+  const data = r.ok ? ((r.threads && r.threads.data) || (Array.isArray(r.threads) ? r.threads : [])) : [];
+  HIST = data.map((t) => ({ id: t.id, name: t.name, preview: t.preview, at: t.recencyAt || t.createdAt || t.updatedAt || 0 }));
+  mergeLocal();
+  renderHistory();
+}
+async function renderThreadItems(id) {
+  const r = await api(`/api/threads/${encodeURIComponent(id)}/history`);
+  if (!r.ok) { addTurnLine("讀不到這輪的紀錄：" + r.error); return; }
+  const items = r.items || [];
+  state.items.clear();
+  if (!items.length) {
+    addTurnLine("這輪沒有可讀的紀錄：可能是當時打的任務沒跑完（或送出失敗），也可能是勾了「不保存歷史」。下面只顯示本地記得的第一個任務。");
+    const rec = TITLES[id];
+    if (rec && rec.p) {
+      const it = makeItem("user", "你（本地記得的任務）");
+      it.body.textContent = rec.p;
+    }
+    return;
+  }
+  const from = r.source === "codex_session_file" ? "（從 Codex 的紀錄檔讀）" : "";
+  addTurnLine(`先前的紀錄：共 ${items.length} 項${from}`);
+  for (const item of items) {
+    if (item.role) {
+      const who = item.role === "assistant" ? "Codex" : (item.role === "user" ? "你" : item.role);
+      const it = makeItem(item.role === "user" ? "user" : "agent", who);
+      if (item.role === "user") it.body.textContent = item.text; else setMarkdown(it, item.text);
+    } else if (item.type === "userMessage") {
+      const text = (item.content || []).map((c) => (c && c.text) || "").join("\n").trim();
+      const it = makeItem("user", "你");
+      it.body.textContent = text;
+    } else {
+      completeItem(item);
+    }
+  }
+  scrollDown();
+}
+async function openThread(id) {
+  if (!id) return;
+  if (state.busy) { addTurnLine("正在跑，先等這回合結束再換對話。"); return; }
+  if (!(await ensureConnected())) return;
+  const r = await api(`/api/threads/${encodeURIComponent(id)}/resume`, threadPayload());
+  if (!r.ok) { addTurnLine("還原失敗：" + r.error); return; }
+  timeline.innerHTML = "";
+  const rec = HIST.find((x) => x.id === id);
+  setThread(id, "打開「" + titleOf(rec || { id }) + "」");
+  await renderThreadItems(id);
+}/* ---------- 圓圈：這輪對話用了多少 context ---------- */
+function drawRing(u) {
+  const b = (u && (u.last || u.total)) || {};
+  const win = (u && u.modelContextWindow) || (parseInt($("ctx").value, 10) || 262144);
+  const used = (b.inputTokens || 0) + (b.outputTokens || 0);
+  const pct = win ? Math.min(100, Math.round((used / win) * 100)) : 0;
+  const C = 94.25;
+  const arc = $("ctxArc");
+  arc.style.strokeDasharray = C + " " + C;
+  arc.style.strokeDashoffset = C * (1 - pct / 100);
+  $("ctxPct").textContent = pct + "%";
+  const ring = $("ctxRing");
+  ring.classList.remove("warn", "bad");
+  if (pct >= 90) ring.classList.add("bad");
+  else if (pct >= 70) ring.classList.add("warn");
+  const fromSetting = !(u && u.modelContextWindow);
+  $("ctxLine").textContent = `用掉 ${used} / ${win}（${pct}%）` + (fromSetting ? " · 依設定的上下文長度推算" : "");
+  ring.title = "這輪對話用了 " + pct + "%：按了可以手動壓縮";
+}
+function resetRing() {
+  const arc = $("ctxArc");
+  if (!arc) return;
+  arc.style.strokeDasharray = "94.25 94.25";
+  arc.style.strokeDashoffset = "94.25";
+  $("ctxPct").textContent = "0%";
+  $("ctxLine").textContent = "還沒有用量。";
+  $("ctxRing").classList.remove("warn", "bad");
+}
+$("ctxRing").onclick = () => { $("ctxPanel").classList.toggle("show"); refreshButtons(); };
+$("btnNew").onclick = () => {
+  if (state.busy) { addTurnLine("正在跑，先等這回合結束再開新對話。"); return; }
+  state.threadId = null; state.turnId = null; state.items.clear();
+  timeline.innerHTML = '<div class="empty">打任務按「送出」就會自動開新對話。</div>';
+  resetRing(); renderHistory(); refreshButtons();
+  $("prompt").focus();
+};
+$("btnRefresh").onclick = () => refreshHistory();
+
+/* ---------- 自動連線 / 自動開新對話 ---------- */
+async function ensureConnected() {
+  if (state.connected) {
+    if (state.modelOk !== true) await checkHealth();   // 上次檢查連不上：送出前再確認一次，免得白等逾時
+    return state.modelOk !== false;
+  }
+  addTurnLine("自己連線中…（第一次可能比較久）");
+  const r = await api("/api/connect", connPayload());
+  if (!r.ok) {
+    addTurnLine("連線失敗：" + r.error + "（到右邊「連線設定」檢查 Base URL，或按「測試連線」）");
+    show($("connResult"), "自己連線失敗：" + r.error, false);
+    return false;
+  }
+  state.connected = true;
+  state.modelOk = null; SKILLS = null;
+  show($("connResult"), "已自動連線", true);
+  await checkHealth();   // app-server 起得來不代表模型伺服器連得到
+  return state.modelOk !== false;
+}
+async function ensureThread() {
+  if (state.threadId) return true;
+  addTurnLine("自己開新對話…");
+  const r = await api("/api/threads", threadPayload());
+  if (!r.ok) { addTurnLine("開新對話失敗：" + r.error); return false; }
+  setThread(r.thread_id, "自動開新對話");
+  return true;
+}
+/* ---------- 實際操作：送出一個 turn ---------- */
+async function sendTurn() {
+  const picked = [...state.skills];
+  const text = $("prompt").value.trim() || (picked.length ? "請使用指定的 skill 完成任務。" : "");
+  if (!text || state.busy) return;
+  saveSettings();
+  if (!(await ensureConnected())) return;
+  if (!(await ensureThread())) return;
+  rememberThread(state.threadId, text);
+  let schema = null;
+  if ($("useSchema").checked) {
+    try {
+      schema = JSON.parse($("schema").value);
+    } catch {
+      addTurnLine("output_schema 不是有效 JSON，先改好再送（右邊「本回合參數」裡的框）。");
+      return;
+    }
+  }
+  makeItem("user", "你" + (picked.length ? "（skill：" + picked.map((k) => k.name).join("、") + "）" : "")).body.textContent = text;
+  scrollDown(true);
+  $("prompt").value = "";
+  state.skills = []; renderChips();
+  state.busy = true;
+  state.items.clear();
+  state.t0 = performance.now();
+  refreshButtons();
+  const timer = setInterval(refreshButtons, 250);
+  try {
+    const res = await fetch(`/api/threads/${encodeURIComponent(state.threadId)}/turn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        skills: picked.map((k) => ({ name: k.name, path: k.path })),
+        effort: $("effort").value,
+        sandbox: $("turnSandbox").value,
+        output_schema: schema,
+      }),
+    });
+    const ctype = res.headers.get("content-type") || "";
+    if (!ctype.includes("text/event-stream")) {
+      const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      handleEvent({ method: "agent/error", payload: { message: data.error || data.detail || "回應不是事件串流" } });
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder("utf-8");
+    let buf = "";
+    while (true) {
+      const got = await reader.read();
+      if (got.done) break;
+      buf += dec.decode(got.value, { stream: true });
+      const blocks = buf.split("\n\n");
+      buf = blocks.pop();
+      for (const block of blocks) {
+        for (const line of block.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          try { handleEvent(JSON.parse(line.slice(6))); } catch { /* 跳過單行解析失敗 */ }
+        }
+      }
+    }
+  } catch (err) {
+    addTurnLine("讀事件時斷線：" + ((err && err.message) || err));
+  } finally {
+    clearInterval(timer);
+    expireAsks("回合已結束，沒有回答");
+    state.busy = false;
+    setTimeout(checkHealth, 0);   // 回合失敗多半是模型伺服器掛了，結束時順便確認
+    state.turnId = null;
+    refreshButtons();
+  }
+}
+$("btnSend").onclick = sendTurn;
+$("steerText").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.isComposing && ev.keyCode !== 229) { ev.preventDefault(); $("btnSteer").click(); }
+});
+/* ---------- 打 / 找功能：內建指令 + Codex 載入的 skills ---------- */
+const COMMANDS = [
+  { name: "new", desc: "開新對話", run: () => $("btnNew").click() },
+  { name: "compact", desc: "壓縮這輪對話（context 快滿時用）", run: () => $("btnCompact").click() },
+  { name: "stop", desc: "中斷正在跑的回合", run: () => $("btnInterrupt").click() },
+  { name: "clear", desc: "清空中間的畫面（紀錄還在左邊）", run: () => $("btnClear").click() },
+  { name: "skills", desc: "重新讀取並列出所有可用的 skills", run: () => listSkills() },
+  { name: "review", desc: "填入範本：審查目前還沒 commit 的變更", fill: "審查目前還沒 commit 的變更（git diff 與未追蹤的檔案）：列出可能的 bug、風險與建議，依嚴重程度排序，不要直接修改檔案。" },
+  { name: "settings", desc: "打開右邊的設定", run: () => foldPanel("sidebar", false) },
+  { name: "help", desc: "列出所有指令", run: () => addTurnLine("指令：" + COMMANDS.map((c) => "/" + c.name + " " + c.desc).join("　·　")) },
+];
+let SKILLS = null;   // null = 還沒讀過
+async function loadSkills(reload) {
+  if (!state.connected) return false;
+  const q = new URLSearchParams({ cwd: $("cwd").value.trim(), reload: reload ? "true" : "false" });
+  const r = await api("/api/skills?" + q);
+  if (!r.ok) { addTurnLine("讀不到 skills：" + r.error); return false; }
+  SKILLS = r.skills || [];
+  for (const e of r.errors || []) addTurnLine("skill 載入失敗：" + (e.path || "") + " " + (e.message || JSON.stringify(e)));
+  return true;
+}
+async function listSkills() {
+  if (!(await ensureConnected()) || !(await loadSkills(true))) return;
+  if (!SKILLS.length) { addTurnLine("目前沒有可用的 skills（放在 ~/.codex/skills/ 或專案的 .codex/skills/）。"); return; }
+  const it = makeItem("other", `可用的 skills（${SKILLS.length}）`);
+  it.body.textContent = SKILLS.map((k) => `$${k.name}  ${k.description || ""}  [${k.scope}]`).join("\n");
+}
+function renderChips() {
+  const box = $("skillChips");
+  box.innerHTML = "";
+  box.hidden = !state.skills.length;
+  for (const k of state.skills) {
+    const c = document.createElement("span"); c.className = "chip"; c.textContent = "$" + k.name; c.title = k.path;
+    const x = document.createElement("button"); x.textContent = "✕"; x.title = "不要用這個 skill";
+    x.onclick = () => { state.skills = state.skills.filter((s) => s !== k); renderChips(); $("prompt").focus(); };
+    c.appendChild(x); box.appendChild(c);
+  }
+}
+const slash = { open: false, items: [], idx: 0 };
+function slashQuery() {
+  // 只有整個輸入框是「/xxx」時才跳選單，句子中間的 / 不會干擾；中文輸入法打出的全形「／」也算
+  const m = $("prompt").value.match(/^[\/／](\S*)$/);
+  return m ? m[1].toLowerCase() : null;
+}
+function closeSlash() { slash.open = false; $("slashMenu").hidden = true; }
+function renderSlash() {
+  const q = slashQuery();
+  if (q === null) { closeSlash(); return; }
+  if (SKILLS === null && state.connected && !slash.loading) {
+    slash.loading = true;
+    loadSkills(false).finally(() => { slash.loading = false; if (slashQuery() !== null) renderSlash(); });
+  }
+  const hit = (name, desc) => !q || name.toLowerCase().includes(q) || (desc || "").toLowerCase().includes(q);
+  const cmds = COMMANDS.filter((c) => hit(c.name, c.desc)).map((c) => ({ kind: "cmd", label: "/" + c.name, desc: c.desc, c }));
+  const sks = (SKILLS || []).filter((k) => hit(k.name, k.description) && !state.skills.includes(k))
+    .map((k) => ({ kind: "skill", label: "$" + k.name, desc: k.description, k }));
+  slash.items = [...cmds, ...sks];
+  slash.idx = Math.min(slash.idx, Math.max(0, slash.items.length - 1));
+  const box = $("slashMenu");
+  box.innerHTML = "";
+  const note = (t) => { const n = document.createElement("div"); n.className = "none"; n.textContent = t; box.appendChild(n); };
+  const group = (t) => { const g = document.createElement("div"); g.className = "grp"; g.textContent = t; box.appendChild(g); };
+  slash.items.forEach((x, n) => {
+    if (n === 0 && x.kind === "cmd") group("指令");
+    if (x.kind === "skill" && (n === 0 || slash.items[n - 1].kind !== "skill")) group("Skills（選了會明確交給 Codex 使用）");
+    const o = document.createElement("div");
+    o.className = "opt" + (n === slash.idx ? " on" : ""); o.setAttribute("role", "option");
+    const b = document.createElement("b"); b.textContent = x.label;
+    const d = document.createElement("span"); d.textContent = x.desc || ""; d.title = x.desc || "";
+    o.append(b, d);
+    o.onmousedown = (ev) => { ev.preventDefault(); pickSlash(n); };   // mousedown：搶在輸入框失焦前
+    box.appendChild(o);
+  });
+  if (!state.connected) note("連線後才看得到 skills（送出一次任務或按「啟動 Codex」）。");
+  else if (SKILLS === null) note("讀取 skills 中…");
+  else if (!slash.items.length) note("沒有符合的指令或 skill。");
+  box.hidden = false; slash.open = true;
+  const on = box.querySelector(".opt.on"); if (on) on.scrollIntoView({ block: "nearest" });
+}
+function pickSlash(n) {
+  const x = slash.items[n];
+  if (!x) return;
+  $("prompt").value = "";
+  closeSlash();
+  if (x.kind === "skill") { state.skills.push(x.k); renderChips(); }
+  else if (x.c.fill) $("prompt").value = x.c.fill;
+  else x.c.run();
+  $("prompt").focus();
+}
+$("prompt").addEventListener("input", () => { slash.idx = 0; renderSlash(); });
+$("prompt").addEventListener("blur", () => setTimeout(closeSlash, 100));
+$("prompt").addEventListener("keydown", (ev) => {
+  if (ev.isComposing || ev.keyCode === 229) return;   // 中文輸入法選字中
+  if (slash.open && slash.items.length) {
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      const n = slash.items.length;
+      slash.idx = (slash.idx + (ev.key === "ArrowDown" ? 1 : n - 1)) % n;
+      renderSlash(); return;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") { ev.preventDefault(); pickSlash(slash.idx); return; }
+  }
+  if (slash.open && ev.key === "Escape") { ev.preventDefault(); closeSlash(); return; }
+  if (ev.key === "Backspace" && !$("prompt").value && state.skills.length) { state.skills.pop(); renderChips(); return; }
+  if (ev.key !== "Enter" || ev.shiftKey) return;
+  ev.preventDefault(); sendTurn();
+});
+$("btnInterrupt").onclick = async () => {
+  if (!state.turnId) return;
+  expireAsks("已中斷（視為拒絕）");
+  const r = await api(`/api/turns/${encodeURIComponent(state.turnId)}/interrupt`, {});
+  addTurnLine(r.ok ? "已要求中斷這個回合" : "中斷失敗：" + r.error);
+};
+$("btnSteer").onclick = async () => {
+  const text = $("steerText").value.trim();
+  if (!state.turnId || !text) return;
+  const r = await api(`/api/turns/${encodeURIComponent(state.turnId)}/steer`, { text });
+  if (r.ok) { makeItem("user", "你（補充指示）").body.textContent = text; $("steerText").value = ""; scrollDown(); }
+  else addTurnLine("補充失敗：" + r.error);
+};
+$("btnCompact").onclick = async () => {
+  if (!state.threadId) return;
+  addTurnLine("壓縮對話中…");
+  const r = await api(`/api/threads/${encodeURIComponent(state.threadId)}/compact`, {});
+  if (!r.ok) { show($("ctxResult"), "壓縮失敗：" + r.error, false); return; }
+  show($("ctxResult"), r.result, true);
+  addTurnLine("壓縮完成，用量會慢慢更新。");
+};
+$("btnClear").onclick = () => {
+  timeline.innerHTML = '<div class="empty">畫面已清空。左邊的標題還在，按標題可以把紀錄讀回來。</div>';
+  state.items.clear();
+};
+$("useSchema").onchange = () => { $("schemaBox").classList.toggle("show", $("useSchema").checked); };
+
+/* ---------- 開頁面：只讀狀態，自己不會送 turn ---------- */
+(async function init() {
+  const s = await api("/api/status");
+  if (s.error) { addTurnLine("讀不到後端狀態：" + s.error); refreshButtons(); return; }
+  state.connected = !!s.connected;
+  if (state.connected) checkHealth();
+  if (!$("devInstr").value) $("devInstr").value = SCRATCH_RULE;
+  await refreshHistory();
+  if (state.connected) {
+    if (HIST.length) {
+      const last = HIST[0];
+      const r = await api(`/api/threads/${encodeURIComponent(last.id)}/resume`, threadPayload());
+      if (r.ok) {
+        setThread(last.id, "自動還原上次的對話");
+        await renderThreadItems(last.id);
+      } else {
+        addTurnLine("自動還原失敗：" + r.error);
+      }
+    }
+  } else {
+    addTurnLine("打任務按「送出」就好：程式會自己連線、自己開新對話。");
+  }
+  if ($("useSchema").checked) $("schemaBox").classList.add("show");
+  refreshButtons();
+})();
+</script>
+</body>
+</html>
