@@ -174,13 +174,32 @@ Codex 自己的對話紀錄在 `~/.codex/sessions/`。
 對方的 chat UI ──/v1/chat/completions + token──▶ openai_gateway.py（8766）──▶ codex_agent_server.py（8765，只聽本機）
 ```
 
+兩個服務都會佔住終端機，要**開兩個終端機**各跑一個：
+
 ```bash
-python codex_agent_server.py                                   # 照常啟動，不用開放給外面
-CODEX_GATEWAY_TOKEN=pwd \
-LLM_BASE_URL=http://192.168.31.120:8080/v1 LLM_MODEL=strata \
-CODEX_GATEWAY_CWD=/path/to/project \
-python openai_gateway.py --host 0.0.0.0
+# 終端機 1：後端照常啟動，不用開放給外面
+python codex_agent_server.py --port 9000
 ```
+
+```bash
+# 終端機 2：gateway
+python openai_gateway.py --host 0.0.0.0 --token pwd --llm-url http://192.168.31.120:8080/v1 --llm-model strata --cwd /path/to/project
+```
+
+所有參數（`python openai_gateway.py --help` 也看得到）：
+
+| 參數 | 意思 | 預設 |
+|---|---|---|
+| `--host` / `--port` | gateway 聽的位置 | `127.0.0.1` / `8766` |
+| `--token` | 對方要帶的 token（單一 token） | 無 |
+| `--users` | 多人名單檔，見下面「多人使用」 | 無 |
+| `--cwd` | Codex 的工作資料夾（多人模式是各人資料夾的上層） | 見下面 |
+| `--sandbox` | read-only / workspace-write / full-access | workspace-write |
+| `--llm-url` / `--llm-model` / `--llm-key` | 模型伺服器；有給的話，Codex 還沒啟動時 gateway 會自己連線 | 無（要先在網頁上連線） |
+| `--agent-url` | `codex_agent_server.py` 的位置 | `http://127.0.0.1:8765` |
+
+每個參數也可以用環境變數設（例如 `CODEX_GATEWAY_TOKEN`、`LLM_BASE_URL`，`--help` 裡有對照），命令列參數優先。`--token` 會留在命令列歷史和工作管理員裡，正式使用建議改用 `--users` 名單檔。
+
 
 對方的設定：
 
@@ -205,14 +224,14 @@ python openai_gateway.py --host 0.0.0.0
 ```
 
 ```bash
-CODEX_GATEWAY_USERS=gateway_users.json CODEX_GATEWAY_CWD=/srv/codex-workspaces python openai_gateway.py --host 0.0.0.0
+python openai_gateway.py --host 0.0.0.0 --users gateway_users.json --cwd /srv/codex-workspaces
 ```
 
-- **自動分資料夾**：gateway 依 token 認人，alice 的對話都在 `CODEX_GATEWAY_CWD/alice/` 裡工作，資料夾會自動建立。`CODEX_GATEWAY_CWD` 沒設時是專案裡的 `workspaces/`。
+- **自動分資料夾**：gateway 依 token 認人，alice 的對話都在 `<--cwd>/alice/` 裡工作，資料夾會自動建立。沒給 `--cwd` 時是專案裡的 `workspaces/`。
 - **對話不互通**：alice 和 bob 的對話各自分開，就算送一樣的歷史也不會接到對方的。
 - **新增或移除人**：改名單檔後重啟 gateway。
 - **名單格式**：名稱只能用英數字、`_`、`-`；token 至少 16 字且不能重複，不符合就拒絕啟動。
-- **只有一組 token 時**：可以改用 `CODEX_GATEWAY_TOKEN=...`，不分資料夾，工作資料夾就是 `CODEX_GATEWAY_CWD`。
+- **只有一組 token 時**：可以改用 `--token`，不分資料夾，工作資料夾就是 `--cwd`；沒給 `--cwd` 時是啟動 `codex_agent_server.py` 時所在的資料夾。
 - ⚠️ **沙盒只限制寫入、不限制讀取**：Codex 讀得到執行帳號能讀的所有檔案，包括別人的資料夾。所以要用專用帳號跑（見下一節），讓它至少讀不到你的檔案。
 
 ### 用專用帳號跑（Windows）
@@ -229,9 +248,7 @@ CODEX_GATEWAY_USERS=gateway_users.json CODEX_GATEWAY_CWD=/srv/codex-workspaces p
    cd C:\codex-agent
    pip install -r requirements.txt
    Start-Process python codex_agent_server.py
-   $env:CODEX_GATEWAY_USERS="gateway_users.json"; $env:CODEX_GATEWAY_CWD="C:\codex-workspaces"
-   $env:LLM_BASE_URL="http://192.168.31.120:8080/v1"; $env:LLM_MODEL="strata"
-   python openai_gateway.py --host 0.0.0.0
+   python openai_gateway.py --host 0.0.0.0 --users gateway_users.json --cwd C:\codex-workspaces --llm-url http://192.168.31.120:8080/v1 --llm-model strata
    ```
 4. 防火牆只開 8766，8765 不要開。要開機自動啟動，就用「工作排程器」設定以 `codex-svc` 身分執行，並勾選「不論使用者登入與否均執行」。
 
@@ -241,12 +258,11 @@ Linux 的作法相同：`sudo useradd -m codex-svc`，再用 `sudo -u codex-svc 
 
 ### 其他說明
 
-- **token 必填**：`--host` 不是本機時，`CODEX_GATEWAY_USERS` 和 `CODEX_GATEWAY_TOKEN` 都沒設就不給啟動。
+- **token 必填**：`--host` 不是本機時，`--users` 和 `--token` 都沒給就不給啟動。
 - **對話自動對應**：同一段對話接著問會沿用同一個 Codex 對話，只送最後一句。改過舊訊息、gateway 或後端重啟過，就開新對話，並把先前的內容當參考一起送。
 - **核准由 Codex 自己決定**：固定用 `auto_review`，不會跳出卡片。對方只會看到回覆文字，看不到指令執行過程。
 - **一次只跑一個回合**：所有人共用一個佇列，別人正在用時會回 **429**，大部分 chat UI 會顯示「請稍後再試」。
 - **斷線就中止**：對方中途關掉，這個回合會跟著中止。
-- **其他環境變數**：`CODEX_GATEWAY_SANDBOX`（預設 workspace-write）、`CODEX_AGENT_URL`（預設 `http://127.0.0.1:8765`）、`LLM_API_KEY`。沒設 `LLM_BASE_URL` 的話，要先在網頁上連線。
 - **忽略的參數**：`temperature`、`tools`、圖片這類 OpenAI 參數。
 
 ## 檔案

@@ -11,16 +11,16 @@
 
 Skills：訊息只打 /skills 會列出可用的 skills（不經過模型）；訊息裡的 $名稱 會明確指定 Codex 使用該 skill。
 
-環境變數：
-    CODEX_GATEWAY_USERS    多人使用：名單檔（JSON，{"使用者": "token"}），每人用自己的 token，
-                           工作資料夾自動分到 CODEX_GATEWAY_CWD/<使用者>/，對話也互不相通
-    CODEX_GATEWAY_TOKEN    只有一組 token 時用這個（沒設 USERS 時才看）；對外開放時兩者至少設一個
-    CODEX_AGENT_URL        codex_agent_server.py 位置，預設 http://127.0.0.1:8765
-    CODEX_GATEWAY_CWD      Codex 的工作資料夾；多人模式是各人資料夾的上層，預設 ./workspaces
-                           單一 token 時預設是 codex_agent_server.py 的啟動位置
-    CODEX_GATEWAY_SANDBOX  read-only / workspace-write（預設）/ full-access
-    LLM_BASE_URL、LLM_MODEL、LLM_API_KEY
-                           有設的話，Codex 還沒啟動時 gateway 會自己連線；沒設就要先在網頁按連線
+設定（命令列參數優先，沒給才看環境變數）：
+    --users     CODEX_GATEWAY_USERS    多人使用：名單檔（JSON，{"使用者": "token"}），每人用自己的 token，
+                                       工作資料夾自動分到 CODEX_GATEWAY_CWD/<使用者>/，對話也互不相通
+    --token     CODEX_GATEWAY_TOKEN    只有一組 token 時用這個（沒設 USERS 時才看）；對外開放時兩者至少設一個
+    --agent-url CODEX_AGENT_URL        codex_agent_server.py 位置，預設 http://127.0.0.1:8765
+    --cwd       CODEX_GATEWAY_CWD      Codex 的工作資料夾；多人模式是各人資料夾的上層，預設 ./workspaces
+                                       單一 token 時預設是 codex_agent_server.py 的啟動位置
+    --sandbox   CODEX_GATEWAY_SANDBOX  read-only / workspace-write（預設）/ full-access
+    --llm-url / --llm-model / --llm-key   LLM_BASE_URL / LLM_MODEL / LLM_API_KEY
+                                       有設的話，Codex 還沒啟動時 gateway 會自己連線；沒設就要先在網頁按連線
 """
 from __future__ import annotations
 
@@ -43,12 +43,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-AGENT_URL = os.environ.get("CODEX_AGENT_URL", "http://127.0.0.1:8765")
 MODEL_ID = "codex-agent"
-THREAD_SETTINGS = {
-    "cwd": os.environ.get("CODEX_GATEWAY_CWD", ""),
-    "sandbox": os.environ.get("CODEX_GATEWAY_SANDBOX", "workspace-write"),
-    "approval_mode": "auto_review",   # 對方的 UI 不會處理核准卡片，交給 Codex 自己審
+OPTIONS = {   # 命令列參數 → 對應的環境變數
+    "--users": "CODEX_GATEWAY_USERS", "--token": "CODEX_GATEWAY_TOKEN", "--cwd": "CODEX_GATEWAY_CWD",
+    "--sandbox": "CODEX_GATEWAY_SANDBOX", "--agent-url": "CODEX_AGENT_URL",
+    "--llm-url": "LLM_BASE_URL", "--llm-model": "LLM_MODEL", "--llm-key": "LLM_API_KEY",
 }
 
 
@@ -69,14 +68,26 @@ def load_users() -> tuple[dict[str, str], Path | None]:
     return users, root.resolve()
 
 
-USERS, WORKSPACE_ROOT = load_users()
-LLM = {k: v for k, v in {"base_url": os.environ.get("LLM_BASE_URL"),
-                         "model": os.environ.get("LLM_MODEL"),
-                         "api_key": os.environ.get("LLM_API_KEY")}.items() if v}
+def configure() -> None:
+    """從環境變數讀設定；main() 會先把命令列參數寫進環境變數再呼叫一次。"""
+    global AGENT_URL, THREAD_SETTINGS, USERS, WORKSPACE_ROOT, LLM, agent
+    AGENT_URL = os.environ.get("CODEX_AGENT_URL", "http://127.0.0.1:8765")
+    THREAD_SETTINGS = {
+        "cwd": os.environ.get("CODEX_GATEWAY_CWD", ""),
+        "sandbox": os.environ.get("CODEX_GATEWAY_SANDBOX", "workspace-write"),
+        "approval_mode": "auto_review",   # 對方的 UI 不會處理核准卡片，交給 Codex 自己審
+    }
+    USERS, WORKSPACE_ROOT = load_users()
+    LLM = {k: v for k, v in {"base_url": os.environ.get("LLM_BASE_URL"),
+                             "model": os.environ.get("LLM_MODEL"),
+                             "api_key": os.environ.get("LLM_API_KEY")}.items() if v}
+    agent = httpx.AsyncClient(base_url=AGENT_URL, timeout=httpx.Timeout(30, read=None))
+
+
+configure()
 
 # ponytail: 對應表只放記憶體、上限 1000 筆，gateway 重啟後舊對話會改開新 thread（附上歷史文字），要持久化再存檔
 threads: OrderedDict[str, str] = OrderedDict()
-agent = httpx.AsyncClient(base_url=AGENT_URL, timeout=httpx.Timeout(30, read=None))
 
 app = FastAPI(title="Codex Agent OpenAI Gateway")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -290,9 +301,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Codex Agent 的 OpenAI 相容轉接層")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8766)
+    for flag, env in OPTIONS.items():
+        ap.add_argument(flag, help=f"沒給時用環境變數 {env}")
     a = ap.parse_args()
+    for flag, env in OPTIONS.items():
+        value = getattr(a, flag[2:].replace("-", "_"))
+        if value is not None:
+            os.environ[env] = value
+    configure()
     if a.host not in ("127.0.0.1", "localhost") and not USERS:
-        sys.exit("對外開放（--host 不是本機）一定要設 CODEX_GATEWAY_USERS 或 CODEX_GATEWAY_TOKEN，"
+        sys.exit("對外開放（--host 不是本機）一定要給 --users 或 --token，"
                  "否則任何人都能在這台電腦執行指令")
     if WORKSPACE_ROOT:
         print(f"多人模式：{', '.join(USERS)}，工作資料夾在 {WORKSPACE_ROOT}")
