@@ -2,8 +2,13 @@
 
 用網頁操作 Codex coding agent，模型改接自架的模型伺服器（例如 Strata），不連 OpenAI 的雲端服務。
 
+有兩種用法：
+
+- **網頁**：打開 `codex_agent.html`，看得到指令執行過程，可以核准、中斷、補充指示。
+- **OpenAI 相容介面**：別人用自己現成的對話框連進來，直接使用這台的 Codex。見[給其他程式用：OpenAI 相容介面](#給其他程式用openai-相容介面)。
+
 ```
-瀏覽器（codex_agent.html）
+瀏覽器（codex_agent.html）   或   其他人的 chat UI → openai_gateway.py（選用）
    │  HTTP / SSE
    ▼
 codex_agent_server.py（FastAPI）
@@ -171,8 +176,12 @@ Codex 自己的對話紀錄在 `~/.codex/sessions/`。
 別人已經有自己的對話框、只想用這台的 Codex 加模型時，另外跑 `openai_gateway.py`。它提供 OpenAI 格式的 `/v1/chat/completions`，對方把 Base URL 換成這台就能用，不用改程式。
 
 ```
-對方的 chat UI ──/v1/chat/completions + token──▶ openai_gateway.py（8766）──▶ codex_agent_server.py（8765，只聽本機）
+對方的 chat UI ──/v1/chat/completions + token──▶ openai_gateway.py（8766）──▶ codex_agent_server.py（只聽本機）
 ```
+
+gateway 只做格式轉換和排隊，實際工作都交給 `codex_agent_server.py`。所以**兩個服務都要跑**，而且和網頁共用同一個 Codex。
+
+### 啟動 gateway
 
 兩個服務都會佔住終端機，要**開兩個終端機**各跑一個：
 
@@ -183,8 +192,12 @@ python codex_agent_server.py --port 9000
 
 ```bash
 # 終端機 2：gateway
-python openai_gateway.py --host 0.0.0.0 --token pwd --llm-url http://192.168.31.120:8080/v1 --llm-model strata --cwd /path/to/project
+python openai_gateway.py --host 0.0.0.0 --token pwd --agent-url http://127.0.0.1:9000 --llm-url http://192.168.31.120:8080/v1 --llm-model strata --cwd /path/to/project
 ```
+
+- **`--agent-url` 要對到後端的 port**：後端用預設的 8765 時可以省略。像上面後端改成 `--port 9000`，gateway 就要加 `--agent-url http://127.0.0.1:9000`，不然每個請求都會回 502「連不到 Codex Agent 後端」。
+- **Codex 會自己啟動**：有給 `--llm-url` 的話，第一個請求進來時 gateway 會自己啟動 Codex，不用先開網頁。沒給就要先在網頁上連線。
+- **token 必填**：`--host` 不是本機時，`--users` 和 `--token` 都沒給就不給啟動。
 
 所有參數（`python openai_gateway.py --help` 也看得到）：
 
@@ -193,27 +206,82 @@ python openai_gateway.py --host 0.0.0.0 --token pwd --llm-url http://192.168.31.
 | `--host` / `--port` | gateway 聽的位置 | `127.0.0.1` / `8766` |
 | `--token` | 對方要帶的 token（單一 token） | 無 |
 | `--users` | 多人名單檔，見下面「多人使用」 | 無 |
-| `--cwd` | Codex 的工作資料夾（多人模式是各人資料夾的上層） | 見下面 |
-| `--sandbox` | read-only / workspace-write / full-access | workspace-write |
+| `--cwd` | Codex 的工作資料夾（多人模式是各人資料夾的上層） | 見「多人使用」 |
+| `--sandbox` | read-only / workspace-write / full-access，打錯會拒絕啟動 | workspace-write |
 | `--llm-url` / `--llm-model` / `--llm-key` | 模型伺服器；有給的話，Codex 還沒啟動時 gateway 會自己連線 | 無（要先在網頁上連線） |
+| `--queue-wait` | 忙碌時最多排隊幾秒，超過才回 429（非串流請求最多 60 秒） | `300` |
 | `--agent-url` | `codex_agent_server.py` 的位置 | `http://127.0.0.1:8765` |
 
 每個參數也可以用環境變數設（例如 `CODEX_GATEWAY_TOKEN`、`LLM_BASE_URL`，`--help` 裡有對照），命令列參數優先。`--token` 會留在命令列歷史和工作管理員裡，正式使用建議改用 `--users` 名單檔。
 
-
-對方的設定：
+### 對方要填的設定
 
 | 欄位 | 值 |
 |---|---|
 | Base URL | `http://<這台IP>:8766/v1` |
 | API key | 發給他的 token |
-| 模型 | `codex-agent` |
+| 模型 | `codex-agent`（gateway 不看這個欄位，但有些 UI 規定要填） |
+
+Base URL 只填到 `/v1`，對方的程式會自己加上 `/chat/completions`。如果欄位要的是完整的請求網址，就填 `http://<這台IP>:8766/v1/chat/completions`。
+
+gateway 提供的端點：
+
+| 方法 | 路徑 | 用途 |
+|---|---|---|
+| GET | `/v1/models` | 模型清單（只有 `codex-agent`） |
+| POST | `/v1/chat/completions` | 對話，支援串流（`"stream": true`）和非串流 |
+
+請求裡只會用到 `messages`、`stream` 和 `reasoning_effort`（思考強度，low / medium / high 等，和網頁相同）。`temperature`、`tools`、圖片等其他欄位會被忽略。
+
+### 測試連線
+
+`ping` 只能確認主機連得到，測不到 port 和網址，要用 `curl`（Windows PowerShell 請打 `curl.exe`）：
+
+```bash
+# 1. gateway 和 token 對不對：回模型清單就是正常
+curl http://<這台IP>:8766/v1/models -H "Authorization: Bearer <token>"
+
+# 2. 整條串起來（gateway → Codex → 模型）：回覆在 choices[0].message.content
+curl http://<這台IP>:8766/v1/chat/completions -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d "{\"messages\":[{\"role\":\"user\",\"content\":\"說一聲 hi 就好\"}]}"
+```
+
+| 回應 | 原因 |
+|---|---|
+| 連線逾時或被拒 | gateway 沒在跑、啟動時沒加 `--host 0.0.0.0`、IP 填錯，或 8766 被防火牆擋住 |
+| 401 | token 錯誤或沒帶（標頭是 `Authorization: Bearer <token>`） |
+| 404 | 路徑錯誤。完整路徑是 `/v1/chat/completions` |
+| 429 | 排隊超過上限還沒輪到，見「忙碌時排隊」 |
+| 502「連不到 Codex Agent 後端」 | `codex_agent_server.py` 沒在跑，或它不在 `--agent-url` 指的位置 |
+| 502「Codex Agent 後端回 …」 | 後端回了錯誤，訊息裡有原因（例如模型伺服器的網址錯誤，Codex 啟動失敗） |
+| 503 | Codex 還沒啟動，而且 gateway 沒給 `--llm-url` |
+
+本機打得通、別台打不通時，在這台檢查：
+
+- **聽的位址**：Windows 用 `netstat -ano | findstr :8766`，Linux 用 `ss -ltn | grep 8766`。要看到 `0.0.0.0:8766`；如果是 `127.0.0.1:8766`，就是啟動時沒加 `--host 0.0.0.0`。
+- **Windows 防火牆**：用系統管理員執行 `New-NetFirewallRule -DisplayName "Codex Gateway" -Direction Inbound -Protocol TCP -LocalPort 8766 -Action Allow`。
+- **從別台測 port**：`Test-NetConnection <這台IP> -Port 8766`（Linux 用 `nc -zv <這台IP> 8766`）。上面兩項都正常但這裡不通，就是網路設備擋住了。
 
 ### 在對方的對話框使用 skills
 
-- **列出 skills**：訊息只打 `/skills`，會直接回覆可用的 skills 清單。這個回覆由 gateway 產生，不經過模型，也不佔排隊。
+- **列出 skills**：訊息只打 `/skills`，會直接回覆可用的 skills 清單。這個回覆由 gateway 產生，不經過模型，也不用排隊。
 - **指定 skill**：訊息裡打 `$名稱`，例如 `$review-agent 幫我審查最近的修改`。名稱對得到的，會明確指定 Codex 使用那個 skill，跟網頁的 `/` 選單一樣；對不到的就當普通文字。一次可以指定好幾個。
 - **不指定也可以**：Codex 看得到所有 skills，會自己判斷要不要用。
+
+### 忙碌時排隊
+
+後端一次只跑一個回合，配合模型伺服器一次只處理一個請求。
+
+- **先來後到**：別人正在用時，請求會排隊，輪到了才開始，不會馬上回錯誤。
+- **排隊上限**：等超過 `--queue-wait`（預設 300 秒，非串流請求最多 60 秒）才放棄。非串流請求會收到 **429**；串流請求已經開始回應、改不了狀態碼，所以會以 `[錯誤] Codex 忙碌中…` 的文字回覆。
+- **建議用串流**：串流請求在排隊和 Codex 跑指令時都會收到心跳，連線不會斷。非串流請求要等整個回合跑完才有回應，Codex 一個回合常常跑好幾分鐘，對方的程式很可能先逾時。
+- **斷線就讓位**：對方中途關掉或逾時，排隊中的會讓出位置，執行中的回合會跟著中止。
+
+### 和網頁共用同一個 Codex
+
+- **同一個程序、同一個名額**：網頁和 gateway 用的是同一個 Codex，也共用「一次只跑一個回合」的名額。
+- **網頁不排隊**：在網頁送任務時如果別人正在跑，會直接顯示「已有進行中的回合」。
+- **在網頁按停止或啟動 Codex**：gateway 正在跑的回合會中斷。對方再送下一句時，gateway 會自動接續原本的對話。
+- **模型設定要一致**：誰先啟動 Codex 就用誰的設定，網頁的「連線設定」和 gateway 的 `--llm-url`、`--llm-model` 要填一樣的。
 
 ### 多人使用：每人一個 token 和資料夾
 
@@ -258,12 +326,9 @@ Linux 的作法相同：`sudo useradd -m codex-svc`，再用 `sudo -u codex-svc 
 
 ### 其他說明
 
-- **token 必填**：`--host` 不是本機時，`--users` 和 `--token` 都沒給就不給啟動。
-- **對話自動對應**：同一段對話接著問會沿用同一個 Codex 對話，只送最後一句。改過舊訊息、gateway 或後端重啟過，就開新對話，並把先前的內容當參考一起送。
-- **核准由 Codex 自己決定**：固定用 `auto_review`，不會跳出卡片。對方只會看到回覆文字，看不到指令執行過程。
-- **一次只跑一個回合**：所有人共用一個佇列，別人正在用時會回 **429**，大部分 chat UI 會顯示「請稍後再試」。
-- **斷線就中止**：對方中途關掉，這個回合會跟著中止。
-- **忽略的參數**：`temperature`、`tools`、圖片這類 OpenAI 參數。
+- **對話自動對應**：OpenAI 格式每次都送完整歷史，Codex 則自己記對話。同一段對話接著問會沿用同一個 Codex 對話，只送最後一句。改過舊訊息或 gateway 重啟過，就開新對話，並把先前的內容當參考一起送。Codex 重啟過時，會先試著接續原本的對話，保留完整上下文。
+- **核准由 Codex 自己決定**：固定用 `auto_review`，不會跳出卡片。模型丟出的提問或核准要求會立刻自動拒絕，讓 Codex 繼續做。
+- **只看得到回覆文字**：對方看不到指令執行過程和思考內容，要看請開網頁，或查 `.agent/logs/`。
 
 ## 檔案
 
@@ -279,4 +344,5 @@ Linux 的作法相同：`sudo useradd -m codex-svc`，再用 `sudo -u codex-svc 
 
 - **SDK 內部介面**：openai-codex SDK 沒有公開「交給使用者核准」、自訂核准處理和列出 skills 的介面，程式用了 SDK 的三處內部函式，在 `codex_agent_server.py` 裡以 `ponytail:` 註解標示。**升級 SDK 後，如果核准卡片不再出現或 `/` 選單沒有 skills，先檢查這三處。**
 - **提問工具是實驗功能**：模型丟出選項請你選，用的是 Codex 標為 under development 的功能（`features.default_mode_request_user_input`）。模型會不會真的發問，取決於模型本身。
-- **只有一個工作階段**：同一時間只跑一個回合，也只保留一個 Codex 程序。多個瀏覽器分頁共用同一份狀態。
+- **只有一個工作階段**：同一時間只跑一個回合，也只保留一個 Codex 程序。多個瀏覽器分頁和 gateway 的所有使用者共用同一份狀態。
+- **gateway 的對話對應只放在記憶體**：最多記 1000 筆。gateway 重啟後，進行中的對話會改開新的 Codex 對話，先前的內容會當參考一起送。
